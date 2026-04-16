@@ -8,6 +8,7 @@ const {
   COMPLETION_ITEM_KIND,
   getReferenceContext,
   getCompletionContext,
+  getSignatureContext,
   normalizeTypeText,
   positionToOffset,
   resolveImportPath
@@ -937,6 +938,104 @@ function makeHoverInfo(code, text, range) {
   return range ? { contents, range } : { contents };
 }
 
+function clampActiveParameter(activeParameter, count) {
+  if (count <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.min(activeParameter, count - 1));
+}
+
+function makeSignatureHelp(label, parameterLabels, activeParameter) {
+  return {
+    signatures: [
+      {
+        label,
+        parameters: parameterLabels.map((item) => ({ label: item }))
+      }
+    ],
+    activeSignature: 0,
+    activeParameter: clampActiveParameter(activeParameter, parameterLabels.length)
+  };
+}
+
+function splitSignatureParameters(signature) {
+  if (!signature) {
+    return [];
+  }
+  const openIndex = signature.indexOf("(");
+  if (openIndex === -1) {
+    return [];
+  }
+  let closeIndex = -1;
+  let roundDepth = 0;
+  for (let index = openIndex; index < signature.length; index += 1) {
+    const ch = signature[index];
+    if (ch === "(") {
+      roundDepth += 1;
+    } else if (ch === ")") {
+      roundDepth -= 1;
+      if (roundDepth === 0) {
+        closeIndex = index;
+        break;
+      }
+    }
+  }
+  if (closeIndex === -1) {
+    return [];
+  }
+  const body = signature.slice(openIndex + 1, closeIndex);
+  if (!body.trim()) {
+    return [];
+  }
+
+  const items = [];
+  let start = 0;
+  let nestedRoundDepth = 0;
+  let squareDepth = 0;
+  let angleDepth = 0;
+  for (let index = 0; index < body.length; index += 1) {
+    const ch = body[index];
+    if (ch === "(") {
+      nestedRoundDepth += 1;
+    } else if (ch === ")") {
+      nestedRoundDepth = Math.max(0, nestedRoundDepth - 1);
+    } else if (ch === "[") {
+      squareDepth += 1;
+    } else if (ch === "]") {
+      squareDepth = Math.max(0, squareDepth - 1);
+    } else if (ch === "<") {
+      angleDepth += 1;
+    } else if (ch === ">") {
+      angleDepth = Math.max(0, angleDepth - 1);
+    } else if (ch === "," && nestedRoundDepth === 0 && squareDepth === 0 && angleDepth === 0) {
+      items.push(normalizeTypeText(body.slice(start, index)));
+      start = index + 1;
+    }
+  }
+  items.push(normalizeTypeText(body.slice(start)));
+  return items.filter(Boolean);
+}
+
+function signatureHelpFromSignature(name, signature, receiverAccess, activeParameter) {
+  const prefix = receiverAccess === "set" ? "set def" : "def";
+  const label = `${prefix} ${name}${signature || ""}`;
+  const parameters = splitSignatureParameters(signature);
+  return makeSignatureHelp(label, parameters, activeParameter);
+}
+
+function signatureHelpFromTypeItem(item, activeParameter) {
+  if (!item || item.kind !== "type") {
+    return null;
+  }
+  const members = item.typeInfo && Array.isArray(item.typeInfo.members) ? item.typeInfo.members : [];
+  const parameterLabels = members.map((member) => {
+    const prefix = member.access === "set" ? "set " : "";
+    const suffix = member.type ? ` ${member.type}` : "";
+    return `${prefix}${member.name}${suffix}`;
+  });
+  return makeSignatureHelp(`${item.name}(${parameterLabels.join(", ")})`, parameterLabels, activeParameter);
+}
+
 function makeQuerySignatureHover(name, signature, receiverAccess) {
   const prefix = receiverAccess === "set" ? "set def" : "def";
   return `${prefix} ${name}${signature || ""}`;
@@ -1496,6 +1595,218 @@ async function findQueryHoverInfo(document, documentIndex, position, settings) {
   return null;
 }
 
+async function findQuerySignatureHelp(document, documentIndex, position, settings) {
+  if (!canUseQueryBackend(document, settings)) {
+    return null;
+  }
+
+  const context = resolveQueryContext(document, settings);
+  if (!context) {
+    return null;
+  }
+
+  const offset = positionToOffset(document.text, position);
+  const signatureContext = getSignatureContext(documentIndex, offset);
+  if (!signatureContext || !signatureContext.segments.length) {
+    return null;
+  }
+
+  const queryRunner = makeQueryRunner(context, settings);
+  const line = position.line + 1;
+  const rootGlobalReply = await queryRunner.infoGlobal(context.activeModule);
+  const scopeContext = await resolveScopeContext(queryRunner, context.activeModule, line);
+  const rootGlobals = resolveRootGlobals(rootGlobalReply);
+  const locals = resolveLocals(scopeContext.scopeLocalReply);
+  const scopeMaps = buildScopeMaps(rootGlobals, locals);
+
+  let state = null;
+  const rootName = signatureContext.segments[0];
+  if (scopeMaps.localsByName.has(rootName)) {
+    const reply = await queryRunner.pv(rootName, scopeContext.scopeLine, context.activeModule);
+    if (reply && reply.ok && reply.result && reply.result.found && reply.result.item) {
+      if (reply.result.item.kind === "func") {
+        return signatureHelpFromSignature(
+          reply.result.item.name,
+          reply.result.item.signature || "",
+          reply.result.item.receiverAccess,
+          signatureContext.activeParameter
+        );
+      }
+      state = {
+        kind: "value",
+        descriptor: makeDescriptorFromPvItem(reply.result.item),
+        moduleName: context.activeModule
+      };
+    }
+  } else if (documentIndex.importMap && documentIndex.importMap.has(rootName)) {
+    const moduleName = resolveImportedModuleCanonical(document, documentIndex, rootName, context);
+    if (!moduleName) {
+      return null;
+    }
+    state = {
+      kind: "module",
+      moduleName
+    };
+  } else if (scopeMaps.globalsByName.has(rootName)) {
+    const item = scopeMaps.globalsByName.get(rootName);
+    const normalizedKind = normalizeQueryGlobalKind(item.kind);
+    if (normalizedKind === "type") {
+      const reply = await queryRunner.pt(rootName, context.activeModule);
+      if (!reply || !reply.ok || !reply.result || !reply.result.found || !reply.result.item) {
+        return null;
+      }
+      if (signatureContext.segments.length === 1) {
+        return signatureHelpFromTypeItem(reply.result.item, signatureContext.activeParameter);
+      }
+      state = {
+        kind: "type",
+        typeName: qualifiedTypeNameFromReplyItem(reply.result.item, rootName, context.activeModule),
+        moduleName: context.activeModule,
+        descriptor: makeTypeDescriptorFromPtItem(reply.result.item)
+      };
+    } else if (normalizedKind === "func") {
+      const reply = await queryRunner.pv(rootName, scopeContext.scopeLine, context.activeModule);
+      if (!reply || !reply.ok || !reply.result || !reply.result.found || !reply.result.item) {
+        return null;
+      }
+      if (signatureContext.segments.length === 1) {
+        return signatureHelpFromSignature(
+          reply.result.item.name,
+          reply.result.item.signature || "",
+          reply.result.item.receiverAccess,
+          signatureContext.activeParameter
+        );
+      }
+      state = {
+        kind: "value",
+        descriptor: makeDescriptorFromPvItem(reply.result.item),
+        moduleName: context.activeModule
+      };
+    } else if (normalizedKind === "global") {
+      const reply = await queryRunner.pv(rootName, scopeContext.scopeLine, context.activeModule);
+      if (!reply || !reply.ok || !reply.result || !reply.result.found || !reply.result.item) {
+        return null;
+      }
+      state = {
+        kind: "value",
+        descriptor: makeDescriptorFromPvItem(reply.result.item),
+        moduleName: context.activeModule
+      };
+    } else {
+      return null;
+    }
+  }
+
+  if (!state) {
+    return null;
+  }
+
+  for (let index = 1; index < signatureContext.segments.length; index += 1) {
+    const segment = signatureContext.segments[index];
+
+    if (state.kind === "module") {
+      const globalsReply = await queryRunner.infoGlobal(state.moduleName);
+      const globals = resolveRootGlobals(globalsReply);
+      const item = globals.find((candidate) => candidate.name === segment);
+      if (!item) {
+        return null;
+      }
+      const normalizedKind = normalizeQueryGlobalKind(item.kind);
+      if (normalizedKind === "type") {
+        const reply = await queryRunner.pt(segment, state.moduleName);
+        if (!reply || !reply.ok || !reply.result || !reply.result.found || !reply.result.item) {
+          return null;
+        }
+        if (index === signatureContext.segments.length - 1) {
+          return signatureHelpFromTypeItem(reply.result.item, signatureContext.activeParameter);
+        }
+        state = {
+          kind: "type",
+          typeName: qualifiedTypeNameFromReplyItem(reply.result.item, segment, state.moduleName),
+          moduleName: state.moduleName,
+          descriptor: makeTypeDescriptorFromPtItem(reply.result.item)
+        };
+        continue;
+      }
+      if (normalizedKind === "func") {
+        const reply = await queryRunner.pv(segment, null, state.moduleName);
+        if (!reply || !reply.ok || !reply.result || !reply.result.found || !reply.result.item) {
+          return null;
+        }
+        if (index === signatureContext.segments.length - 1) {
+          return signatureHelpFromSignature(
+            reply.result.item.name,
+            reply.result.item.signature || "",
+            reply.result.item.receiverAccess,
+            signatureContext.activeParameter
+          );
+        }
+        state = {
+          kind: "value",
+          descriptor: makeDescriptorFromPvItem(reply.result.item),
+          moduleName: state.moduleName
+        };
+        continue;
+      }
+      if (normalizedKind === "global") {
+        const reply = await queryRunner.pv(segment, null, state.moduleName);
+        if (!reply || !reply.ok || !reply.result || !reply.result.found || !reply.result.item) {
+          return null;
+        }
+        state = {
+          kind: "value",
+          descriptor: makeDescriptorFromPvItem(reply.result.item),
+          moduleName: state.moduleName
+        };
+        continue;
+      }
+      return null;
+    }
+
+    let descriptor = null;
+    if (state.kind === "value") {
+      descriptor = await queryDescriptorForType(state.descriptor.type, state.descriptor, queryRunner, state.moduleName);
+    } else if (state.kind === "type") {
+      descriptor = state.descriptor || await queryTypeDescriptor(queryRunner, state.typeName, state.moduleName);
+    }
+    if (!descriptor) {
+      return null;
+    }
+
+    const field = descriptor.members.find((member) => member.name === segment);
+    if (field) {
+      state = {
+        kind: "value",
+        descriptor: makeValueDescriptor(field.type, field.typeInfo || null),
+        moduleName: state.moduleName
+      };
+      continue;
+    }
+
+    const method = descriptor.methods.find((member) => member.name === segment);
+    if (method) {
+      if (index === signatureContext.segments.length - 1) {
+        return signatureHelpFromSignature(
+          method.name,
+          method.signature || method.detail || "",
+          method.receiverAccess,
+          signatureContext.activeParameter
+        );
+      }
+      state = {
+        kind: "value",
+        descriptor: makeValueDescriptor(parseReturnType(method.signature || method.detail), null),
+        moduleName: state.moduleName
+      };
+      continue;
+    }
+
+    return null;
+  }
+
+  return null;
+}
+
 async function runQueryDiagnostics(document, settings) {
   if (!canUseQueryBackend(document, settings)) {
     return null;
@@ -1517,6 +1828,7 @@ module.exports = {
   closeAllQuerySessions,
   findQueryDefinitionLocation: resolveQueryDefinitionLocation,
   findQueryHoverInfo,
+  findQuerySignatureHelp,
   markQuerySessionDirty,
   resolveQueryContext,
   runQueryCommands,

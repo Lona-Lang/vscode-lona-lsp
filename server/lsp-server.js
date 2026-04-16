@@ -9,6 +9,7 @@ const {
   buildDocumentIndex,
   findDefinitionLocation,
   findHoverInfo,
+  findSignatureHelp,
   positionToOffset,
   resolveImportPath
 } = require("./lona-index");
@@ -17,6 +18,7 @@ const {
   closeAllQuerySessions,
   findQueryDefinitionLocation,
   findQueryHoverInfo,
+  findQuerySignatureHelp,
   markQuerySessionDirty,
   resolveQueryContext,
   runQueryDiagnostics
@@ -161,6 +163,8 @@ class LonaLanguageServer {
         return this.provideDefinition(params);
       case "textDocument/hover":
         return this.provideHover(params);
+      case "textDocument/signatureHelp":
+        return this.provideSignatureHelp(params);
       default:
         return null;
     }
@@ -222,7 +226,10 @@ class LonaLanguageServer {
           triggerCharacters: ["."]
         },
         definitionProvider: true,
-        hoverProvider: true
+        hoverProvider: true,
+        signatureHelpProvider: {
+          triggerCharacters: ["(", ","]
+        }
       }
     };
   }
@@ -367,6 +374,10 @@ class LonaLanguageServer {
     return findQueryHoverInfo(document, documentIndex, position, this.settings);
   }
 
+  async querySignatureHelp(document, documentIndex, position) {
+    return findQuerySignatureHelp(document, documentIndex, position, this.settings);
+  }
+
   async queryDiagnostics(document) {
     return runQueryDiagnostics(document, this.settings);
   }
@@ -483,6 +494,29 @@ class LonaLanguageServer {
     }
     const offset = positionToOffset(document.text, params.position);
     return findHoverInfo(
+      documentIndex,
+      offset,
+      (importSymbol) => this.resolveModuleIndex(document, importSymbol)
+    );
+  }
+
+  async provideSignatureHelp(params) {
+    const document = this.getDocument(params.textDocument.uri);
+    if (!document) {
+      return null;
+    }
+    const documentIndex = this.getOrBuildIndex(document);
+    let queryHelp = null;
+    try {
+      queryHelp = await this.querySignatureHelp(document, documentIndex, params.position);
+    } catch (error) {
+      this.logServerError(`signature-help:${document.filePath || document.uri}`, error);
+    }
+    if (queryHelp) {
+      return queryHelp;
+    }
+    const offset = positionToOffset(document.text, params.position);
+    return findSignatureHelp(
       documentIndex,
       offset,
       (importSymbol) => this.resolveModuleIndex(document, importSymbol)

@@ -26,6 +26,7 @@ class CrashTolerantServer extends LonaLanguageServer {
     this.queryCompletionError = null;
     this.queryDefinitionError = null;
     this.queryHoverError = null;
+    this.querySignatureHelpError = null;
     this.queryDiagnosticsImpl = null;
     this.logged = [];
   }
@@ -54,6 +55,13 @@ class CrashTolerantServer extends LonaLanguageServer {
   async queryHoverInfo() {
     if (this.queryHoverError) {
       throw this.queryHoverError;
+    }
+    return null;
+  }
+
+  async querySignatureHelp() {
+    if (this.querySignatureHelpError) {
+      throw this.querySignatureHelpError;
     }
     return null;
   }
@@ -171,6 +179,42 @@ def run() i32 {
   assert.ok(Array.isArray(hover.contents));
   assert.equal(hover.contents[0].value, "value i32");
   assert.ok(server.logged.some((entry) => entry.scope.startsWith("hover:")));
+});
+
+test("signature help falls back to the local index when query throws", async () => {
+  const { workspace, filePath } = writeWorkspaceFile("lona-lsp-signature-", "main.lo", `
+struct Point {
+    value i32
+    label str
+}
+
+def run() i32 {
+    var point = Point(value = 1, )
+    ret point.value
+}
+`);
+  const connection = new FakeConnection();
+  const server = new CrashTolerantServer(connection);
+  server.settings = {
+    ...server.settings,
+    rootPaths: [workspace]
+  };
+  server.querySignatureHelpError = new Error("query crashed");
+  server.openDocument({
+    uri: fileUri(filePath),
+    text: fs.readFileSync(filePath, "utf8"),
+    version: 1
+  });
+
+  const help = await server.provideSignatureHelp({
+    textDocument: { uri: fileUri(filePath) },
+    position: { line: 7, character: 32 }
+  });
+
+  assert.ok(help);
+  assert.equal(help.signatures[0].label, "Point(value i32, label str)");
+  assert.equal(help.activeParameter, 1);
+  assert.ok(server.logged.some((entry) => entry.scope.startsWith("signature-help:")));
 });
 
 test("diagnostics keep the last successful publish when query throws", async () => {

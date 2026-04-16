@@ -10,6 +10,7 @@ const {
   buildCompletionItems,
   buildDocumentIndex,
   findDefinitionLocation,
+  findSignatureHelp,
   positionToOffset,
   resolveImportPath
 } = require("../server/lona-index");
@@ -239,4 +240,41 @@ def run() i32 {
   assert.equal(fieldDefinition.path, mathPath);
   assert.equal(fieldDefinition.range.start.line, 2);
   assert.equal(fieldDefinition.range.start.character, 4);
+});
+
+test("shows signature help for functions and struct initializers", () => {
+  const source = `
+struct Point {
+    value i32
+    label str
+}
+
+def add(left i32, right i32) i32 {
+    ret left + right
+}
+
+def run() i32 {
+    var point = Point(value = 1, )
+    ret add(point.value, )
+}
+`;
+  const index = buildDocumentIndex({
+    uri: "file:///tmp/main.lo",
+    filePath: "/tmp/main.lo",
+    text: source
+  });
+
+  const pointOffset = positionToOffset(source, { line: 11, character: 32 });
+  const pointHelp = findSignatureHelp(index, pointOffset, () => null);
+  assert.ok(pointHelp);
+  assert.equal(pointHelp.signatures[0].label, "Point(value i32, label str)");
+  assert.equal(pointHelp.activeParameter, 1);
+  assert.deepEqual(pointHelp.signatures[0].parameters.map((item) => item.label), ["value i32", "label str"]);
+
+  const addOffset = positionToOffset(source, { line: 12, character: 24 });
+  const addHelp = findSignatureHelp(index, addOffset, () => null);
+  assert.ok(addHelp);
+  assert.equal(addHelp.signatures[0].label, "def add(left i32, right i32) i32");
+  assert.equal(addHelp.activeParameter, 1);
+  assert.deepEqual(addHelp.signatures[0].parameters.map((item) => item.label), ["left i32", "right i32"]);
 });

@@ -1599,6 +1599,43 @@ function findIdentifierTokenIndex(tokens, offset) {
   return fallback;
 }
 
+function findTokenBeforeOffset(tokens, offset) {
+  let fallback = -1;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.type === "eof") {
+      return fallback;
+    }
+    if (offset > token.start && offset <= token.end) {
+      return index;
+    }
+    if (token.end <= offset) {
+      fallback = index;
+      continue;
+    }
+    if (token.start > offset) {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
+function findMatchingBackward(tokens, startIndex, openValue, closeValue) {
+  let depth = 0;
+  for (let index = startIndex; index >= 0; index -= 1) {
+    const token = tokens[index];
+    if (token.value === closeValue) {
+      depth += 1;
+    } else if (token.value === openValue) {
+      depth -= 1;
+      if (depth === 0) {
+        return index;
+      }
+    }
+  }
+  return -1;
+}
+
 function getReferenceContext(documentIndex, offset) {
   const tokenIndex = findIdentifierTokenIndex(documentIndex.tokens, offset);
   if (tokenIndex === -1) {
@@ -1630,6 +1667,107 @@ function getReferenceContext(documentIndex, offset) {
     segments,
     targetSegmentIndex: Math.floor((tokenIndex - startIndex) / 2)
   };
+}
+
+function parseCallSegmentsBeforeIndex(tokens, startIndex) {
+  let index = startIndex;
+  while (index >= 0 && tokens[index].type === "newline") {
+    index -= 1;
+  }
+  if (index < 0) {
+    return null;
+  }
+  if (tokens[index].value === "]") {
+    const openIndex = findMatchingBackward(tokens, index, "[", "]");
+    if (openIndex === -1) {
+      return null;
+    }
+    index = openIndex - 1;
+    while (index >= 0 && tokens[index].type === "newline") {
+      index -= 1;
+    }
+  }
+  if (index < 0 || tokens[index].type !== "identifier") {
+    return null;
+  }
+
+  const segments = [tokens[index].value];
+  index -= 1;
+  while (
+    index - 1 >= 0 &&
+    tokens[index].value === "." &&
+    tokens[index - 1].type === "identifier"
+  ) {
+    segments.push(tokens[index - 1].value);
+    index -= 2;
+  }
+
+  return segments.reverse();
+}
+
+function getSignatureContext(documentIndex, offset) {
+  const tokenIndex = findTokenBeforeOffset(documentIndex.tokens, offset);
+  if (tokenIndex === -1) {
+    return null;
+  }
+
+  let roundDepth = 0;
+  let squareDepth = 0;
+  let braceDepth = 0;
+  let activeParameter = 0;
+
+  for (let index = tokenIndex; index >= 0; index -= 1) {
+    const token = documentIndex.tokens[index];
+    if (token.value === ")") {
+      if (squareDepth === 0 && braceDepth === 0) {
+        roundDepth += 1;
+      }
+      continue;
+    }
+    if (token.value === "(") {
+      if (squareDepth !== 0 || braceDepth !== 0) {
+        continue;
+      }
+      if (roundDepth > 0) {
+        roundDepth -= 1;
+        continue;
+      }
+      const segments = parseCallSegmentsBeforeIndex(documentIndex.tokens, index - 1);
+      if (!segments || segments.length === 0) {
+        return null;
+      }
+      return {
+        segments,
+        activeParameter,
+        openIndex: index
+      };
+    }
+    if (token.value === "]") {
+      squareDepth += 1;
+      continue;
+    }
+    if (token.value === "[") {
+      if (squareDepth > 0) {
+        squareDepth -= 1;
+      }
+      continue;
+    }
+    if (token.value === "}") {
+      braceDepth += 1;
+      continue;
+    }
+    if (token.value === "{") {
+      if (braceDepth > 0) {
+        braceDepth -= 1;
+      }
+      continue;
+    }
+    if (token.value === "," && roundDepth === 0 && squareDepth === 0 && braceDepth === 0) {
+      activeParameter += 1;
+    }
+  }
+
+  return null;
 }
 
 function makeDefinitionLocation(filePath, symbol) {
@@ -1828,6 +1966,55 @@ function hoverInfoForState(state, currentIndex) {
     const prefix = state.symbol.writable ? "set " : "";
     const suffix = state.symbol.declaredType ? ` ${state.symbol.declaredType}` : "";
     return makeHoverInfo(`${prefix}${state.symbol.name}${suffix}`, null, range);
+  }
+
+  return null;
+}
+
+function functionParameterLabel(param) {
+  return param.type ? `${param.name} ${param.type}` : param.name;
+}
+
+function fieldParameterLabel(field) {
+  const prefix = field.writable ? "set " : "";
+  const suffix = field.declaredType ? ` ${field.declaredType}` : "";
+  return `${prefix}${field.name}${suffix}`;
+}
+
+function clampActiveParameter(activeParameter, count) {
+  if (count <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.min(activeParameter, count - 1));
+}
+
+function makeSignatureHelp(label, parameterLabels, activeParameter) {
+  return {
+    signatures: [
+      {
+        label,
+        parameters: parameterLabels.map((item) => ({ label: item }))
+      }
+    ],
+    activeSignature: 0,
+    activeParameter: clampActiveParameter(activeParameter, parameterLabels.length)
+  };
+}
+
+function signatureHelpForState(state, activeParameter) {
+  if (!state) {
+    return null;
+  }
+
+  if (state.kind === "function" || state.kind === "method") {
+    const labels = state.symbol.params.map((param) => functionParameterLabel(param));
+    return makeSignatureHelp(formatFunctionDetail(state.symbol), labels, activeParameter);
+  }
+
+  if (state.kind === "struct") {
+    const labels = state.symbol.fields.map((field) => fieldParameterLabel(field));
+    const params = labels.join(", ");
+    return makeSignatureHelp(`${state.symbol.name}(${params})`, labels, activeParameter);
   }
 
   return null;
@@ -2051,6 +2238,28 @@ function findHoverInfo(documentIndex, offset, resolveModuleIndex) {
   return null;
 }
 
+function findSignatureHelp(documentIndex, offset, resolveModuleIndex) {
+  const signatureContext = getSignatureContext(documentIndex, offset);
+  if (!signatureContext || signatureContext.segments.length === 0) {
+    return null;
+  }
+
+  const context = buildDefinitionContext(documentIndex, offset, resolveModuleIndex);
+  let state = resolveRootState(signatureContext.segments[0], context);
+  if (!state) {
+    return null;
+  }
+
+  for (let index = 1; index < signatureContext.segments.length; index += 1) {
+    state = advanceDefinitionState(stateForContinuation(state, context), signatureContext.segments[index], context);
+    if (!state) {
+      return null;
+    }
+  }
+
+  return signatureHelpForState(state, signatureContext.activeParameter);
+}
+
 function resolveImportPath(currentFilePath, importPath, includeDirectories) {
   if (!currentFilePath) {
     return null;
@@ -2081,8 +2290,10 @@ module.exports = {
   buildDocumentIndex,
   findDefinitionLocation,
   findHoverInfo,
+  findSignatureHelp,
   getReferenceContext,
   getCompletionContext,
+  getSignatureContext,
   normalizeTypeText,
   offsetToPosition,
   positionToOffset,

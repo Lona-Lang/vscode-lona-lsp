@@ -291,6 +291,36 @@ class LonaExtensionClient {
           }
         }
       ),
+      vscode.languages.registerSignatureHelpProvider(
+        [
+          { language: "lona", scheme: "file" },
+          { language: "lona", scheme: "untitled" }
+        ],
+        {
+          provideSignatureHelp: async (document, position) => {
+            const help = await this.rpc.sendRequest("textDocument/signatureHelp", {
+              textDocument: { uri: document.uri.toString() },
+              position: toLspPosition(position)
+            });
+            if (!help || !Array.isArray(help.signatures) || help.signatures.length === 0) {
+              return null;
+            }
+            const result = new vscode.SignatureHelp();
+            result.activeSignature = typeof help.activeSignature === "number" ? help.activeSignature : 0;
+            result.activeParameter = typeof help.activeParameter === "number" ? help.activeParameter : 0;
+            result.signatures = help.signatures.map((signature) => {
+              const item = new vscode.SignatureInformation(signature.label);
+              item.parameters = (signature.parameters || []).map((parameter) => {
+                return new vscode.ParameterInformation(parameter.label);
+              });
+              return item;
+            });
+            return result;
+          }
+        },
+        "(",
+        ","
+      ),
       vscode.workspace.onDidOpenTextDocument((document) => this.didOpenDocument(document)),
       vscode.workspace.onDidChangeTextDocument((event) => this.didChangeDocument(event)),
       vscode.workspace.onDidSaveTextDocument((document) => this.didSaveDocument(document)),
