@@ -12,6 +12,9 @@ function logToChannel(channel, level, message) {
   }
   const method = typeof channel[level] === "function" ? level : "appendLine";
   channel[method](message);
+  if ((level === "warn" || level === "error") && typeof channel.show === "function") {
+    channel.show(true);
+  }
 }
 
 class JsonRpcClient {

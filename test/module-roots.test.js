@@ -19,16 +19,17 @@ test("configured root paths are used as-is after normalization and deduplication
   ]);
 });
 
-test("module roots fall back to the current file directory when rootPaths is empty", () => {
+test("module roots use automatic root paths when rootPaths is empty", () => {
   const document = {
     filePath: "/workspace/app/src/feature.lo"
   };
   const settings = {
-    rootPaths: []
+    rootPaths: [],
+    autoRootPaths: ["/workspace/app"]
   };
 
   assert.deepEqual(buildModuleRoots(document, settings), [
-    "/workspace/app/src"
+    "/workspace/app"
   ]);
 });
 

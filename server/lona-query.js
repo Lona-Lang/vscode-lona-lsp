@@ -128,55 +128,55 @@ function canUseQueryBackend(document, settings) {
 function makeSessionKey(context, settings) {
   return [
     settings.queryPath || "lona-query",
-    context.rootPaths.join("|"),
-    context.entryModule
+    context.rootPaths.join("|")
   ].join("::");
 }
 
 class QuerySession {
   constructor(context, settings, onClose) {
     this.rootPaths = context.rootPaths;
-    this.entryModule = context.entryModule;
     this.binary = settings.queryPath || "lona-query";
     this.onClose = onClose;
+    this.scope = `query:${makeSessionKey(context, settings)}`;
     this.processHandle = null;
     this.stdoutBuffer = "";
     this.stderrBuffer = "";
     this.currentRequest = null;
     this.queue = Promise.resolve();
     this.closed = false;
-    this.entryLoaded = false;
     this.currentModule = null;
     this.currentLine = null;
     this.dirtyModules = new Set();
   }
 
   async run(query) {
-    const targetModule = query.module || this.entryModule;
+    const targetModule = query.module || this.currentModule;
     const commandList = Array.isArray(query.commands) ? query.commands.join(" | ") : "";
-    const scope = `query:${this.entryModule}`;
     const startedAt = Date.now();
     const warningTimer = setTimeout(() => {
-      writeQueryLog("warn", scope, `still running after ${QUERY_WARNING_MS}ms module=${targetModule} line=${typeof query.line === "number" ? query.line : "-"} commands=${commandList}`);
+      writeQueryLog("warn", this.scope, `still running after ${QUERY_WARNING_MS}ms module=${targetModule || "-"} line=${typeof query.line === "number" ? query.line : "-"} commands=${commandList}`);
     }, QUERY_WARNING_MS);
     if (typeof warningTimer.unref === "function") {
       warningTimer.unref();
     }
-    writeQueryLog("trace", scope, `run module=${targetModule} line=${typeof query.line === "number" ? query.line : "-"} commands=${commandList}`);
+    writeQueryLog("trace", this.scope, `run module=${targetModule || "-"} line=${typeof query.line === "number" ? query.line : "-"} commands=${commandList}`);
     const task = async () => {
+      if (!targetModule) {
+        throw new Error("lona-query request is missing an active module");
+      }
       await this.ensureStarted();
-      await this.prepare(query.module || this.entryModule, query.line);
+      await this.prepare(targetModule, query.line);
       return this.sendCommandsRaw(query.commands || []);
     };
     const promise = this.queue.then(task, task);
     this.queue = promise.catch(() => {});
     return promise.then((result) => {
       clearTimeout(warningTimer);
-      writeQueryLog("trace", scope, `done in ${Date.now() - startedAt}ms replies=${Array.isArray(result) ? result.length : 0}`);
+      writeQueryLog("trace", this.scope, `done in ${Date.now() - startedAt}ms replies=${Array.isArray(result) ? result.length : 0}`);
       return result;
     }, (error) => {
       clearTimeout(warningTimer);
-      writeQueryLog("error", scope, error);
+      writeQueryLog("error", this.scope, error);
       throw error;
     });
   }
@@ -191,7 +191,7 @@ class QuerySession {
     if (this.processHandle && !this.processHandle.killed) {
       return;
     }
-    writeQueryLog("info", `query:${this.entryModule}`, `spawn ${this.binary} roots=${this.rootPaths.join(",")}`);
+    writeQueryLog("info", this.scope, `spawn ${this.binary} roots=${this.rootPaths.join(",")}`);
     await new Promise((resolve, reject) => {
       const child = spawn(this.binary, ["--format", "json", ...this.rootPaths], {
         stdio: ["pipe", "pipe", "pipe"]
@@ -211,7 +211,6 @@ class QuerySession {
         this.processHandle = child;
         this.stdoutBuffer = "";
         this.stderrBuffer = "";
-        this.entryLoaded = false;
         this.currentModule = null;
         this.currentLine = null;
         child.stdout.setEncoding("utf8");
@@ -222,7 +221,7 @@ class QuerySession {
         });
         child.on("exit", (code, signal) => this.handleExit(code, signal));
         child.on("error", (error) => this.handleProcessError(error));
-        writeQueryLog("info", `query:${this.entryModule}`, `spawned pid=${child.pid || "unknown"}`);
+        writeQueryLog("info", this.scope, `spawned pid=${child.pid || "unknown"}`);
         resolve();
       };
       const handleError = (error) => {
@@ -242,28 +241,21 @@ class QuerySession {
   async prepare(targetModule, line) {
     const commands = [];
     const nextState = {
-      entryLoaded: this.entryLoaded,
       currentModule: this.currentModule,
       currentLine: this.currentLine,
       dirtyModules: new Set(this.dirtyModules)
     };
-
-    if (!nextState.entryLoaded) {
-      commands.push(`open ${this.entryModule}`);
-      nextState.entryLoaded = true;
-      nextState.currentModule = this.entryModule;
-      nextState.currentLine = null;
-    }
 
     if (nextState.dirtyModules.size > 0) {
       for (const moduleName of Array.from(nextState.dirtyModules).sort()) {
         commands.push(`reload ${moduleName}`);
       }
       nextState.dirtyModules.clear();
+      nextState.currentModule = null;
       nextState.currentLine = null;
     }
 
-    const moduleToOpen = targetModule || nextState.currentModule || this.entryModule;
+    const moduleToOpen = targetModule || nextState.currentModule;
     if (moduleToOpen && nextState.currentModule !== moduleToOpen) {
       commands.push(`open ${moduleToOpen}`);
       nextState.currentModule = moduleToOpen;
@@ -279,9 +271,8 @@ class QuerySession {
       return;
     }
 
-    writeQueryLog("trace", `query:${this.entryModule}`, `prepare ${commands.join(" | ")}`);
+    writeQueryLog("trace", this.scope, `prepare ${commands.join(" | ")}`);
     await this.sendCommandsRaw(commands);
-    this.entryLoaded = nextState.entryLoaded;
     this.currentModule = nextState.currentModule;
     this.currentLine = nextState.currentLine;
     this.dirtyModules = nextState.dirtyModules;
@@ -306,7 +297,7 @@ class QuerySession {
         reject
       };
       try {
-        writeQueryLog("trace", `query:${this.entryModule}`, `send ${commands.join(" | ")}`);
+        writeQueryLog("trace", this.scope, `send ${commands.join(" | ")}`);
         this.processHandle.stdin.write(`${commands.join("\n")}\n`, "utf8");
       } catch (error) {
         const request = this.currentRequest;
@@ -344,7 +335,7 @@ class QuerySession {
   handleExit(code, signal) {
     const stderr = this.stderrBuffer.trim();
     const reason = stderr || `lona-query exited (code=${code}, signal=${signal || "none"})`;
-    writeQueryLog(code === 0 ? "info" : "warn", `query:${this.entryModule}`, `exit ${reason}`);
+    writeQueryLog(code === 0 ? "info" : "warn", this.scope, `exit ${reason}`);
     this.processHandle = null;
     this.stdoutBuffer = "";
     this.stderrBuffer = "";
@@ -359,7 +350,7 @@ class QuerySession {
   }
 
   handleProcessError(error) {
-    writeQueryLog("error", `query:${this.entryModule}`, error);
+    writeQueryLog("error", this.scope, error);
     if (this.currentRequest) {
       const request = this.currentRequest;
       this.currentRequest = null;
@@ -372,7 +363,7 @@ class QuerySession {
     if (!this.processHandle || this.processHandle.killed) {
       return;
     }
-    writeQueryLog("trace", `query:${this.entryModule}`, "close session");
+    writeQueryLog("trace", this.scope, "close session");
     try {
       this.processHandle.stdin.write("quit\n", "utf8");
     } catch {
@@ -411,7 +402,7 @@ function markQuerySessionDirty(target, settings) {
   }
   const session = querySessions.get(makeSessionKey(context, settings));
   if (session) {
-    writeQueryLog("trace", `query:${context.entryModule}`, `mark dirty ${context.activeModule}`);
+    writeQueryLog("trace", session.scope, `mark dirty ${context.activeModule}`);
     session.markDirty(context.activeModule);
   }
 }
@@ -422,6 +413,10 @@ function closeAllQuerySessions() {
     session.close();
   }
   querySessions.clear();
+}
+
+function getActiveQuerySessionCount() {
+  return querySessions.size;
 }
 
 function replyByCommand(replies, command) {
@@ -1868,6 +1863,7 @@ module.exports = {
   canUseQueryBackend,
   canonicalModuleName,
   closeAllQuerySessions,
+  getActiveQuerySessionCount,
   findQueryDefinitionLocation: resolveQueryDefinitionLocation,
   findQueryHoverInfo,
   findQuerySignatureHelp,

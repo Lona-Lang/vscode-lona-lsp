@@ -52,7 +52,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Root paths passed to lona-query. Relative paths are resolved against the first workspace folder. When empty, the current file directory is used."
+          "description": "Root paths passed to lona-query. Relative paths are resolved against the first workspace folder. When empty, the language server derives a stable automatic root path from the workspace, or from the first opened file when no workspace is available."
         },
         "lona.lsp.enableDiagnostics": {
           "type": "boolean",

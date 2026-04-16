@@ -12,6 +12,7 @@ const {
   canUseQueryBackend,
   closeAllQuerySessions,
   findQueryDefinitionLocation,
+  getActiveQuerySessionCount,
   resolveQueryContext,
   runQueryDiagnostics
 } = require("../server/lona-query");
@@ -74,7 +75,7 @@ test("query backend is enabled for saved files inside the configured root paths"
   assert.equal(canUseQueryBackend(dirtyImportedDocument, settings), false);
 });
 
-test("query backend falls back to the current file when no root module is configured", () => {
+test("query backend uses automatic root paths when provided by the wrapper", () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-query-current-"));
   const filePath = path.join(workspace, "main.lo");
   const text = "ret 0\n";
@@ -85,8 +86,14 @@ test("query backend falls back to the current file when no root module is config
     text
   };
 
-  assert.equal(canUseQueryBackend(document, { preferQueryBackend: true }), true);
-  assert.deepEqual(resolveQueryContext(document, { preferQueryBackend: true }), {
+  assert.equal(canUseQueryBackend(document, {
+    preferQueryBackend: true,
+    autoRootPaths: [workspace]
+  }), true);
+  assert.deepEqual(resolveQueryContext(document, {
+    preferQueryBackend: true,
+    autoRootPaths: [workspace]
+  }), {
     rootPaths: [workspace],
     activeFilePath: filePath,
     activeModule: "main",
@@ -179,6 +186,41 @@ def value() i32 {
   closeAllQuerySessions();
 });
 
+test("query diagnostics include imported module errors when opened from the root file", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-query-imported-diagnostics-"));
+  const mainPath = path.join(workspace, "main.lo");
+  const helperPath = path.join(workspace, "helper.lo");
+  const mainText = `
+import helper
+
+def run() i32 {
+    ret helper.value()
+}
+`;
+  const helperText = `
+def value() i32 {
+    ret missing
+}
+`;
+  fs.writeFileSync(mainPath, mainText, "utf8");
+  fs.writeFileSync(helperPath, helperText, "utf8");
+
+  const diagnostics = await runQueryDiagnostics({
+    uri: `file://${mainPath}`,
+    filePath: mainPath,
+    text: mainText
+  }, {
+    queryPath: "lona-query",
+    rootPaths: [workspace],
+    preferQueryBackend: true
+  });
+
+  assert.ok(Array.isArray(diagnostics));
+  assert.ok(diagnostics.some((item) => item.path === helperPath));
+
+  closeAllQuerySessions();
+});
+
 test("query-backed completion auto-dereferences pointers and trait dyn receivers", async () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-query-receiver-"));
   const mainPath = path.join(workspace, "main.lo");
@@ -223,6 +265,48 @@ def run() i32 {
 
   assert.ok(pointerItems.some((item) => item.label === "value"));
   assert.ok(dynItems.some((item) => item.label === "hash"));
+
+  closeAllQuerySessions();
+});
+
+test("query backend reuses a single session across files in the same root paths", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-query-session-"));
+  const mainPath = path.join(workspace, "main.lo");
+  const helperPath = path.join(workspace, "helper.lo");
+  const mainText = `
+import helper
+
+def run() i32 {
+    ret helper.id(1)
+}
+`;
+  const helperText = `
+def id(v i32) i32 {
+    ret v
+}
+`;
+  fs.writeFileSync(mainPath, mainText, "utf8");
+  fs.writeFileSync(helperPath, helperText, "utf8");
+
+  const settings = {
+    queryPath: "lona-query",
+    rootPaths: [workspace],
+    preferQueryBackend: true
+  };
+
+  await runQueryDiagnostics({
+    uri: `file://${mainPath}`,
+    filePath: mainPath,
+    text: mainText
+  }, settings);
+  assert.equal(getActiveQuerySessionCount(), 1);
+
+  await runQueryDiagnostics({
+    uri: `file://${helperPath}`,
+    filePath: helperPath,
+    text: helperText
+  }, settings);
+  assert.equal(getActiveQuerySessionCount(), 1);
 
   closeAllQuerySessions();
 });

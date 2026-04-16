@@ -257,6 +257,57 @@ test("diagnostics keep the last successful publish when query throws", async () 
   assert.ok(server.logged.some((entry) => entry.scope.startsWith("query-diagnostics:")));
 });
 
+test("diagnostics publish imported module errors to their target uri and clear stale results", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-lsp-imported-diagnostics-"));
+  const mainPath = path.join(workspace, "main.lo");
+  const helperPath = path.join(workspace, "helper.lo");
+  fs.writeFileSync(mainPath, "import helper\n", "utf8");
+  fs.writeFileSync(helperPath, "def value() i32 { ret 0 }\n", "utf8");
+
+  const connection = new FakeConnection();
+  const server = new CrashTolerantServer(connection);
+  const mainUri = fileUri(mainPath);
+  const helperUri = fileUri(helperPath);
+  server.settings = {
+    ...server.settings,
+    rootPaths: [workspace]
+  };
+  server.queryDiagnosticsImpl = async () => [{
+    path: helperPath,
+    range: {
+      start: { line: 1, character: 4 },
+      end: { line: 1, character: 5 }
+    },
+    severity: 1,
+    source: "lona-query",
+    message: "imported diagnostic"
+  }];
+
+  server.openDocument({
+    uri: mainUri,
+    text: fs.readFileSync(mainPath, "utf8"),
+    version: 1
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  connection.messages.length = 0;
+
+  await server.refreshDiagnostics(mainUri);
+  assert.equal(connection.messages.length, 2);
+  assert.deepEqual(connection.messages.map((message) => message.params.uri).sort(), [helperUri, mainUri]);
+  const helperPublish = connection.messages.find((message) => message.params.uri === helperUri);
+  const mainPublish = connection.messages.find((message) => message.params.uri === mainUri);
+  assert.equal(helperPublish.params.diagnostics.length, 1);
+  assert.equal(mainPublish.params.diagnostics.length, 0);
+
+  connection.messages.length = 0;
+  server.queryDiagnosticsImpl = async () => [];
+  await server.refreshDiagnostics(mainUri);
+  assert.equal(connection.messages.length, 2);
+  const helperClear = connection.messages.find((message) => message.params.uri === helperUri);
+  assert.ok(helperClear);
+  assert.equal(helperClear.params.diagnostics.length, 0);
+});
+
 test("notification-side diagnostics failures are swallowed", async () => {
   const { workspace, filePath } = writeWorkspaceFile("lona-lsp-notify-", "main.lo", "def run() i32 {\n    ret 0\n}\n");
   const connection = new FakeConnection();
@@ -278,4 +329,40 @@ test("notification-side diagnostics failures are swallowed", async () => {
 
   assert.equal(connection.messages.length, 0);
   assert.ok(server.logged.some((entry) => entry.scope.startsWith("query-diagnostics:")));
+});
+
+test("automatic root paths stay stable across opened files", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-lsp-auto-root-"));
+  const nestedDir = path.join(workspace, "src", "feature");
+  fs.mkdirSync(nestedDir, { recursive: true });
+  const firstPath = path.join(nestedDir, "first.lo");
+  const secondPath = path.join(workspace, "pkg", "second.lo");
+  fs.mkdirSync(path.dirname(secondPath), { recursive: true });
+  fs.writeFileSync(firstPath, "def run() i32 { ret 0 }\n", "utf8");
+  fs.writeFileSync(secondPath, "def run() i32 { ret 0 }\n", "utf8");
+
+  const connection = new FakeConnection();
+  const server = new CrashTolerantServer(connection);
+  server.initialize({
+    workspaceFolders: [{ uri: fileUri(workspace), name: "workspace" }],
+    initializationOptions: {
+      rootPaths: [],
+      preferQueryBackend: false
+    }
+  });
+
+  assert.deepEqual(server.settings.autoRootPaths, [workspace]);
+
+  server.openDocument({
+    uri: fileUri(firstPath),
+    text: fs.readFileSync(firstPath, "utf8"),
+    version: 1
+  });
+  server.openDocument({
+    uri: fileUri(secondPath),
+    text: fs.readFileSync(secondPath, "utf8"),
+    version: 1
+  });
+
+  assert.deepEqual(server.settings.autoRootPaths, [workspace]);
 });

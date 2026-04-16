@@ -15,10 +15,7 @@ function buildModuleRoots(document, settings) {
   if (configuredRoots.length > 0) {
     return configuredRoots;
   }
-  if (document && document.filePath) {
-    return [path.dirname(normalizePath(document.filePath))];
-  }
-  return [];
+  return unique((settings && settings.autoRootPaths) || []);
 }
 
 module.exports = {

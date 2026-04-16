@@ -101,7 +101,8 @@ code --install-extension /path/to/lona-lsp-<version>.vsix --force
 - 说明：
   - 传给 `lona-query` 的 root 路径列表
   - 相对路径按第一个 workspace folder 解析
-  - 为空时使用当前文件所在目录
+  - 为空时自动使用 workspace 根路径
+  - 如果没有 workspace，则固定使用第一个打开文件所在目录
 
 ### `lona.lsp.enableDiagnostics`
 

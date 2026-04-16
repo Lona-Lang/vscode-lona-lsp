@@ -137,12 +137,14 @@ class LonaLanguageServer {
     this.workspaceFolders = [];
     this.settings = {
       rootPaths: [],
+      autoRootPaths: [],
       enableDiagnostics: true,
       queryPath: "lona-query",
       preferQueryBackend: true
     };
     this.moduleCache = new Map();
     this.queryIdleTimers = new Map();
+    this.queryPublishedDiagnosticsUris = new Set();
     this.shutdownRequested = false;
   }
 
@@ -269,6 +271,7 @@ class LonaLanguageServer {
           ...this.settings,
           ...(params.settings || {})
         };
+        this.updateAutomaticRootPaths();
         this.refreshAllDiagnostics();
         return;
       default:
@@ -289,6 +292,7 @@ class LonaLanguageServer {
       ...this.settings,
       ...(params.initializationOptions || {})
     };
+    this.updateAutomaticRootPaths();
     this.logServer("info", "initialize", `workspaceFolders=${this.workspaceFolders.length} rootPaths=${(this.settings.rootPaths || []).length} preferQueryBackend=${this.settings.preferQueryBackend !== false}`);
     return {
       capabilities: {
@@ -308,7 +312,9 @@ class LonaLanguageServer {
 
   openDocument(textDocument) {
     this.logServer("trace", "document", `open uri=${textDocument.uri} version=${textDocument.version}`);
-    this.documents.set(textDocument.uri, this.createDocumentState(textDocument));
+    const document = this.createDocumentState(textDocument);
+    this.documents.set(textDocument.uri, document);
+    this.ensureAutomaticRootPathsForDocument(document);
     this.invalidateModuleForDocument(textDocument.uri);
     this.refreshDiagnosticsSafely(textDocument.uri);
   }
@@ -356,6 +362,7 @@ class LonaLanguageServer {
     this.clearQueryIdleReload(textDocument.uri);
     this.documents.delete(textDocument.uri);
     this.invalidateModuleForDocument(textDocument.uri);
+    this.queryPublishedDiagnosticsUris.delete(textDocument.uri);
     this.publishDiagnostics(textDocument.uri, []);
   }
 
@@ -371,6 +378,62 @@ class LonaLanguageServer {
 
   getDocument(uri) {
     return this.documents.get(uri) || null;
+  }
+
+  updateAutomaticRootPaths() {
+    if (Array.isArray(this.settings.rootPaths) && this.settings.rootPaths.length > 0) {
+      this.settings.autoRootPaths = [];
+      return;
+    }
+    if (this.workspaceFolders.length > 0) {
+      this.settings.autoRootPaths = this.workspaceFolders.slice();
+      return;
+    }
+    if (!Array.isArray(this.settings.autoRootPaths)) {
+      this.settings.autoRootPaths = [];
+    }
+  }
+
+  ensureAutomaticRootPathsForDocument(document) {
+    if (Array.isArray(this.settings.rootPaths) && this.settings.rootPaths.length > 0) {
+      return;
+    }
+    if (Array.isArray(this.settings.autoRootPaths) && this.settings.autoRootPaths.length > 0) {
+      return;
+    }
+    if (!document || !document.filePath) {
+      return;
+    }
+    this.settings.autoRootPaths = [path.dirname(path.normalize(document.filePath))];
+    this.logServer("info", "initialize", `auto root path=${this.settings.autoRootPaths[0]}`);
+  }
+
+  findOpenDocumentByFilePath(filePath) {
+    const normalizedPath = path.normalize(filePath);
+    return Array.from(this.documents.values()).find((candidate) => candidate.filePath === normalizedPath) || null;
+  }
+
+  documentMatchesDisk(document) {
+    if (!document || !document.filePath) {
+      return false;
+    }
+    try {
+      return fs.readFileSync(document.filePath, "utf8") === document.text;
+    } catch {
+      return false;
+    }
+  }
+
+  shouldPublishQueryDiagnosticsToUri(targetUri) {
+    const targetPath = uriToPath(targetUri);
+    if (!targetPath) {
+      return true;
+    }
+    const openDocument = this.findOpenDocumentByFilePath(targetPath);
+    if (!openDocument) {
+      return true;
+    }
+    return this.documentMatchesDisk(openDocument);
   }
 
   getOrBuildIndex(document) {
@@ -651,22 +714,48 @@ class LonaLanguageServer {
     if (!latestDocument || latestDocument.version !== version) {
       return;
     }
-    const relevantDiagnostics = rawDiagnostics.filter((diagnostic) => {
-      if (!diagnostic.path) {
-        return true;
+    const diagnosticsByUri = new Map();
+    const skippedUris = new Set();
+    const ensureBucket = (targetUri) => {
+      if (!diagnosticsByUri.has(targetUri)) {
+        diagnosticsByUri.set(targetUri, []);
       }
-      if (latestDocument.filePath && diagnostic.path === latestDocument.filePath) {
-        return true;
+      return diagnosticsByUri.get(targetUri);
+    };
+
+    ensureBucket(uri);
+
+    for (const diagnostic of rawDiagnostics) {
+      const targetUri = diagnostic.path ? pathToUri(path.normalize(diagnostic.path)) : uri;
+      if (!this.shouldPublishQueryDiagnosticsToUri(targetUri)) {
+        skippedUris.add(targetUri);
+        this.logServer("trace", "diagnostics", `skip stale query diagnostics for dirty document uri=${targetUri}`);
+        continue;
       }
-      return false;
-    }).map((diagnostic) => ({
-      range: diagnostic.range,
-      severity: diagnostic.severity,
-      source: diagnostic.source,
-      message: diagnostic.message
-    }));
-    this.logServer("trace", "diagnostics", `publish uri=${uri} count=${relevantDiagnostics.length}`);
-    this.publishDiagnostics(uri, relevantDiagnostics);
+      ensureBucket(targetUri).push({
+        range: diagnostic.range,
+        severity: diagnostic.severity,
+        source: diagnostic.source,
+        message: diagnostic.message
+      });
+    }
+
+    const nextPublishedUris = new Set();
+    for (const [targetUri, diagnostics] of diagnosticsByUri.entries()) {
+      nextPublishedUris.add(targetUri);
+      this.logServer("trace", "diagnostics", `publish uri=${targetUri} count=${diagnostics.length}`);
+      this.publishDiagnostics(targetUri, diagnostics);
+    }
+
+    for (const staleUri of Array.from(this.queryPublishedDiagnosticsUris)) {
+      if (nextPublishedUris.has(staleUri) || skippedUris.has(staleUri)) {
+        continue;
+      }
+      this.logServer("trace", "diagnostics", `clear stale uri=${staleUri}`);
+      this.publishDiagnostics(staleUri, []);
+    }
+
+    this.queryPublishedDiagnosticsUris = nextPublishedUris;
   }
 
   refreshAllDiagnostics() {
