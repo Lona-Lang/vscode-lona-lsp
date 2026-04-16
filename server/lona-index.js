@@ -558,6 +558,25 @@ function parseStructBody(documentIndex, source, tokens, structSymbol, openIndex,
   }
 }
 
+function parseTraitBody(source, tokens, traitSymbol, openIndex, closeIndex) {
+  let index = openIndex + 1;
+  while (index < closeIndex) {
+    while (index < closeIndex && tokens[index].type === "newline") {
+      index += 1;
+    }
+    if (index >= closeIndex) {
+      break;
+    }
+    const parsedMethod = parseFunctionLike(source, tokens, index, traitSymbol.name);
+    if (parsedMethod) {
+      traitSymbol.methods.push(parsedMethod.symbol);
+      index = parsedMethod.nextIndex;
+      continue;
+    }
+    index += 1;
+  }
+}
+
 function buildDocumentIndex({ uri, filePath, text }) {
   const tokens = tokenize(text);
   const documentIndex = {
@@ -645,15 +664,21 @@ function buildDocumentIndex({ uri, filePath, text }) {
     if (token.value === "trait") {
       const nameToken = tokens[index + 1];
       if (nameToken && nameToken.type === "identifier") {
-        documentIndex.traits.set(nameToken.value, {
+        const traitSymbol = {
           name: nameToken.value,
+          methods: [],
           range: tokenRange(nameToken)
-        });
+        };
+        documentIndex.traits.set(nameToken.value, traitSymbol);
       }
       let cursor = index + 2;
       if (tokens[cursor] && tokens[cursor].value === "{") {
         const closeBody = findMatching(tokens, cursor, "{", "}");
         if (closeBody !== -1) {
+          const traitSymbol = documentIndex.traits.get(nameToken.value);
+          if (traitSymbol) {
+            parseTraitBody(text, tokens, traitSymbol, cursor, closeBody);
+          }
           documentIndex.skipRanges.push({
             start: tokens[cursor].start,
             end: tokens[closeBody].end
@@ -1159,15 +1184,24 @@ function normalizeReceiverType(typeText) {
   if (!current) {
     return null;
   }
-  while (current.endsWith(" const")) {
-    current = current.slice(0, -6).trim();
-  }
-  while (current.endsWith("*") || current.endsWith("[*]")) {
+  while (true) {
+    if (current.endsWith(" dyn")) {
+      current = current.slice(0, -4).trim();
+      continue;
+    }
+    if (current.endsWith(" const")) {
+      current = current.slice(0, -6).trim();
+      continue;
+    }
     if (current.endsWith("[*]")) {
       current = current.slice(0, -3).trim();
       continue;
     }
-    current = current.slice(0, -1).trim();
+    if (current.endsWith("*")) {
+      current = current.slice(0, -1).trim();
+      continue;
+    }
+    break;
   }
   return current;
 }
@@ -1216,6 +1250,14 @@ function resolveTypeTarget(typeText, context) {
             moduleIndex
           };
         }
+        if (moduleIndex && moduleIndex.traits.has(name)) {
+          return {
+            kind: "trait",
+            trait: moduleIndex.traits.get(name),
+            moduleAlias: alias,
+            moduleIndex
+          };
+        }
       }
     }
   }
@@ -1224,6 +1266,15 @@ function resolveTypeTarget(typeText, context) {
     return {
       kind: "struct",
       struct: context.currentIndex.structs.get(leading),
+      moduleAlias: null,
+      moduleIndex: context.currentIndex
+    };
+  }
+
+  if (context.currentIndex.traits.has(leading)) {
+    return {
+      kind: "trait",
+      trait: context.currentIndex.traits.get(leading),
       moduleAlias: null,
       moduleIndex: context.currentIndex
     };
@@ -1449,6 +1500,13 @@ function memberItemsForTarget(target) {
       });
     }
     return items;
+  }
+  if (target.kind === "trait") {
+    return target.trait.methods.map((method) => ({
+      label: method.name,
+      kind: COMPLETION_ITEM_KIND.METHOD,
+      detail: formatFunctionDetail(method)
+    }));
   }
   return [];
 }

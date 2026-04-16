@@ -8,6 +8,7 @@ const test = require("node:test");
 
 const { buildDocumentIndex } = require("../server/lona-index");
 const {
+  buildQueryCompletionItems,
   canUseQueryBackend,
   closeAllQuerySessions,
   findQueryDefinitionLocation,
@@ -174,6 +175,54 @@ def value() i32 {
   assert.ok(diagnostics.length > 0);
   assert.equal(diagnostics[0].path, mathPath);
   assert.match(diagnostics[0].message, /undefined identifier/i);
+
+  closeAllQuerySessions();
+});
+
+test("query-backed completion auto-dereferences pointers and trait dyn receivers", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-query-receiver-"));
+  const mainPath = path.join(workspace, "main.lo");
+  const mainText = `
+trait Hash {
+    def hash() i32
+}
+
+struct Point {
+    value i32
+}
+
+impl Hash for Point {
+    def hash() i32 {
+        ret self.value + 1
+    }
+}
+
+def run() i32 {
+    var point Point = Point(value = 41)
+    var p Point* = &point
+    var h Hash dyn = cast[Hash dyn](&point)
+    ret p.value + h.hash()
+}
+`;
+  fs.writeFileSync(mainPath, mainText, "utf8");
+
+  const document = {
+    uri: `file://${mainPath}`,
+    filePath: mainPath,
+    text: mainText
+  };
+  const index = buildDocumentIndex(document);
+  const settings = {
+    queryPath: "lona-query",
+    rootPaths: [workspace],
+    preferQueryBackend: true
+  };
+
+  const pointerItems = await buildQueryCompletionItems(document, index, { line: 19, character: 10 }, settings, []);
+  const dynItems = await buildQueryCompletionItems(document, index, { line: 19, character: 20 }, settings, []);
+
+  assert.ok(pointerItems.some((item) => item.label === "value"));
+  assert.ok(dynItems.some((item) => item.label === "hash"));
 
   closeAllQuerySessions();
 });

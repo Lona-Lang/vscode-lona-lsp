@@ -539,17 +539,41 @@ function unwrapTypeForLookup(typeText) {
   if (!current) {
     return null;
   }
-  while (current.endsWith(" const")) {
-    current = current.slice(0, -6).trim();
-  }
-  while (current.endsWith("*") || current.endsWith("[*]")) {
+  while (true) {
+    if (current.endsWith(" dyn")) {
+      current = current.slice(0, -4).trim();
+      continue;
+    }
+    if (current.endsWith(" const")) {
+      current = current.slice(0, -6).trim();
+      continue;
+    }
     if (current.endsWith("[*]")) {
       current = current.slice(0, -3).trim();
       continue;
     }
-    current = current.slice(0, -1).trim();
+    if (current.endsWith("*")) {
+      current = current.slice(0, -1).trim();
+      continue;
+    }
+    break;
   }
   return current;
+}
+
+function buildTypeLookupCandidates(typeText, moduleName) {
+  const normalized = unwrapTypeForLookup(typeText);
+  if (!normalized) {
+    return [];
+  }
+  const candidates = [normalized];
+  if (moduleName) {
+    const localPrefix = `${moduleName}.`;
+    if (normalized.startsWith(localPrefix)) {
+      candidates.push(normalized.slice(localPrefix.length));
+    }
+  }
+  return Array.from(new Set(candidates.filter(Boolean)));
 }
 
 function makeTypeDescriptorFromTypeInfo(typeInfo) {
@@ -693,29 +717,32 @@ function buildScopeMaps(rootGlobals, locals) {
 }
 
 async function queryTypeDescriptor(queryRunner, typeName, moduleName) {
-  const normalizedType = unwrapTypeForLookup(typeName);
-  if (!normalizedType) {
+  const candidates = buildTypeLookupCandidates(typeName, moduleName);
+  if (candidates.length === 0) {
     return null;
   }
 
-  const tuple = makeTupleDescriptor(normalizedType);
+  const tuple = makeTupleDescriptor(candidates[0]);
   if (tuple) {
     return tuple;
   }
 
-  const builtin = builtinDescriptor(normalizedType);
+  const builtin = builtinDescriptor(candidates[0]);
   if (builtin) {
     return builtin;
   }
 
-  const reply = await queryRunner.pt(normalizedType, moduleName);
-  if (!reply || !reply.ok || !reply.result || !reply.result.found || !reply.result.item) {
-    return null;
+  for (const candidate of candidates) {
+    const reply = await queryRunner.pt(candidate, moduleName);
+    if (!reply || !reply.ok || !reply.result || !reply.result.found || !reply.result.item) {
+      continue;
+    }
+    if (reply.result.item.kind !== "type" && reply.result.item.kind !== "trait") {
+      continue;
+    }
+    return makeTypeDescriptorFromPtItem(reply.result.item);
   }
-  if (reply.result.item.kind !== "type" && reply.result.item.kind !== "trait") {
-    return null;
-  }
-  return makeTypeDescriptorFromPtItem(reply.result.item);
+  return null;
 }
 
 async function resolveValueTarget(name, scopeMaps, queryRunner, line, moduleName) {

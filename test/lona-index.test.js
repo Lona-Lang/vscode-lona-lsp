@@ -104,6 +104,40 @@ def run() i32 {
   assert.ok(pointItems.some((item) => item.label === "y"));
 });
 
+test("completes pointer receivers and trait dyn receivers", () => {
+  const source = `
+trait Hash {
+    def hash() i32
+}
+
+struct Point {
+    value i32
+}
+
+def run() i32 {
+    var point Point = Point(value = 41)
+    var p Point* = &point
+    var h Hash dyn = cast[Hash dyn](&point)
+    p.
+    h.
+    ret 0
+}
+`;
+  const index = buildDocumentIndex({
+    uri: "file:///tmp/main.lo",
+    filePath: "/tmp/main.lo",
+    text: source
+  });
+
+  const pointerOffset = positionToOffset(source, { line: 13, character: 6 });
+  const pointerItems = buildCompletionItems(index, pointerOffset, () => null);
+  assert.ok(pointerItems.some((item) => item.label === "value"));
+
+  const dynOffset = positionToOffset(source, { line: 14, character: 6 });
+  const dynItems = buildCompletionItems(index, dynOffset, () => null);
+  assert.ok(dynItems.some((item) => item.label === "hash"));
+});
+
 test("completes locals visible before the cursor", () => {
   const source = `
 def run() i32 {
