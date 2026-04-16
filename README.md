@@ -1,12 +1,14 @@
-# Lona Language Support
+# Lona Query Tools
 
-`Lona Language Support` 是 Lona 语言的 VS Code 扩展仓库。
+`Lona Query Tools` 是 Lona 语言的 VS Code 扩展仓库。
 
 主要能力如下：
 
 - 代码补全
 - 语法与语义诊断
 - 转到定义与速览定义
+- 悬停信息
+- 参数提示
 
 ## 概述
 
@@ -50,7 +52,7 @@
 
 ### Query 会话
 
-- `lona-query` 按 `rootPaths + entry module` 维持长驻会话
+- `lona-query` 按 `queryPath + rootPaths` 复用长驻会话
 - 当前活动文档即 query entry module
 - 导入模块查询通过 `open`、`pv`、`pt` 完成
 
@@ -77,7 +79,7 @@
 ### 安装 VSIX
 
 ```bash
-code --install-extension /path/to/lona-lsp-<version>.vsix --force
+code --install-extension /path/to/lona-query-tools-<version>.vsix --force
 ```
 
 ### 调试扩展
@@ -145,11 +147,3 @@ npm run bench:query-latency
 ```bash
 npx @vscode/vsce package
 ```
-
-## 限制
-
-- `lona-query` 当前主要服务于磁盘已保存且内容一致的文件
-- 未保存缓冲区仍主要依赖本地索引回退
-- imported 模块中的错误不会自动汇总到导入方文件
-- 复杂链式表达式、更深类型推断和更完整语义导航仍较保守
-- `lona-query` 的部分 `reload` 场景仍可能崩溃；LSP 会拦截并恢复，但不会替代 query 修复底层问题

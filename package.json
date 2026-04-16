@@ -1,6 +1,6 @@
 {
-  "name": "lona-lsp",
-  "displayName": "Lona Language Support",
+  "name": "lona-query-tools",
+  "displayName": "Lona Query Tools",
   "description": "Zero-dependency VS Code language tools for the Lona language.",
   "version": "0.1.0",
   "publisher": "tastynoob",
@@ -39,7 +39,7 @@
       }
     ],
     "configuration": {
-      "title": "Lona Language Support",
+      "title": "Lona Query Tools",
       "properties": {
         "lona.lsp.queryPath": {
           "type": "string",
