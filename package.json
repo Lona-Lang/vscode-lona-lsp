@@ -1,0 +1,66 @@
+{
+  "name": "lona-lsp",
+  "displayName": "Lona Language Support",
+  "description": "Zero-dependency VS Code language tools for the Lona language.",
+  "version": "0.1.0",
+  "publisher": "tastynoob",
+  "license": "MIT",
+  "main": "./client/extension.js",
+  "type": "commonjs",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:lona"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "bench:query-latency": "node test/query-latency.js"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "lona",
+        "aliases": [
+          "Lona",
+          "lona"
+        ],
+        "configuration": "./language-configuration.json",
+        "extensions": [
+          ".lo"
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "Lona Language Support",
+      "properties": {
+        "lona.lsp.queryPath": {
+          "type": "string",
+          "default": "lona-query",
+          "description": "Path to the lona-query semantic engine used for completion, definition, and diagnostics on saved files."
+        },
+        "lona.lsp.rootPaths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Root paths passed to lona-query. Relative paths are resolved against the first workspace folder. When empty, the current file directory is used."
+        },
+        "lona.lsp.enableDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Publish diagnostics from lona-query."
+        },
+        "lona.lsp.preferQueryBackend": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prefer lona-query for saved-file completion, definition, and diagnostics within the configured root paths, with automatic fallback to the local parser when unavailable."
+        }
+      }
+    }
+  }
+}
