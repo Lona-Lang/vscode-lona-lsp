@@ -26,6 +26,44 @@ const {
 const { buildModuleRoots } = require("./module-roots");
 
 const QUERY_IDLE_RELOAD_MS = 500;
+const REQUEST_WARNING_MS = 3000;
+
+function formatLogMessage(message) {
+  if (message instanceof Error) {
+    return message.stack || message.message || String(message);
+  }
+  return String(message);
+}
+
+function summarizeParams(method, params) {
+  if (!params) {
+    return "";
+  }
+  switch (method) {
+    case "initialize":
+      return `workspaceFolders=${Array.isArray(params.workspaceFolders) ? params.workspaceFolders.length : 0}`;
+    case "textDocument/completion":
+    case "textDocument/definition":
+    case "textDocument/hover":
+    case "textDocument/signatureHelp": {
+      const uri = params.textDocument && params.textDocument.uri ? params.textDocument.uri : "<unknown>";
+      const line = params.position ? params.position.line : "?";
+      const character = params.position ? params.position.character : "?";
+      return `uri=${uri} position=${line}:${character}`;
+    }
+    case "textDocument/didOpen":
+      return `uri=${params.textDocument && params.textDocument.uri ? params.textDocument.uri : "<unknown>"} version=${params.textDocument && typeof params.textDocument.version === "number" ? params.textDocument.version : "?"}`;
+    case "textDocument/didChange":
+      return `uri=${params.textDocument && params.textDocument.uri ? params.textDocument.uri : "<unknown>"} version=${params.textDocument && typeof params.textDocument.version === "number" ? params.textDocument.version : "?"} changes=${Array.isArray(params.contentChanges) ? params.contentChanges.length : 0}`;
+    case "textDocument/didSave":
+    case "textDocument/didClose":
+      return `uri=${params.textDocument && params.textDocument.uri ? params.textDocument.uri : "<unknown>"}`;
+    case "workspace/didChangeConfiguration":
+      return "settings-updated";
+    default:
+      return "";
+  }
+}
 
 function countLineBreaks(text) {
   const matches = text.match(/\r\n|\r|\n/g);
@@ -108,19 +146,36 @@ class LonaLanguageServer {
     this.shutdownRequested = false;
   }
 
-  logServerError(scope, error) {
-    const message = error && error.stack ? error.stack : String(error);
+  logServer(level, scope, message) {
+    const rendered = formatLogMessage(message);
     try {
-      process.stderr.write(`[lona-lsp] ${scope}: ${message}\n`);
+      for (const line of rendered.split(/\r?\n/)) {
+        process.stderr.write(`[lona-lsp][${level}][${scope}] ${line}\n`);
+      }
     } catch {
       // Ignore logging failures.
     }
   }
 
+  logServerError(scope, error) {
+    this.logServer("error", scope, error);
+  }
+
   handleMessage(message) {
     if (typeof message.id !== "undefined" && message.method) {
+      const scope = `request:${message.method}#${message.id}`;
+      const startedAt = Date.now();
+      this.logServer("info", scope, `start ${summarizeParams(message.method, message.params || {})}`.trim());
+      const warningTimer = setTimeout(() => {
+        this.logServer("warn", scope, `still running after ${REQUEST_WARNING_MS}ms`);
+      }, REQUEST_WARNING_MS);
+      if (typeof warningTimer.unref === "function") {
+        warningTimer.unref();
+      }
       Promise.resolve(this.handleRequest(message.method, message.params || {}))
         .then((result) => {
+          clearTimeout(warningTimer);
+          this.logServer("info", scope, `done in ${Date.now() - startedAt}ms`);
           this.connection.send({
             jsonrpc: "2.0",
             id: message.id,
@@ -128,6 +183,8 @@ class LonaLanguageServer {
           });
         })
         .catch((error) => {
+          clearTimeout(warningTimer);
+          this.logServerError(scope, error);
           this.connection.send({
             jsonrpc: "2.0",
             id: message.id,
@@ -140,9 +197,23 @@ class LonaLanguageServer {
       return;
     }
     if (message.method) {
+      const scope = `notification:${message.method}`;
+      const startedAt = Date.now();
+      this.logServer("trace", scope, `start ${summarizeParams(message.method, message.params || {})}`.trim());
+      const warningTimer = setTimeout(() => {
+        this.logServer("warn", scope, `still running after ${REQUEST_WARNING_MS}ms`);
+      }, REQUEST_WARNING_MS);
+      if (typeof warningTimer.unref === "function") {
+        warningTimer.unref();
+      }
       Promise.resolve()
         .then(() => this.handleNotification(message.method, message.params || {}))
+        .then(() => {
+          clearTimeout(warningTimer);
+          this.logServer("trace", scope, `done in ${Date.now() - startedAt}ms`);
+        })
         .catch((error) => {
+          clearTimeout(warningTimer);
           this.logServerError(`notification:${message.method}`, error);
         });
     }
@@ -218,6 +289,7 @@ class LonaLanguageServer {
       ...this.settings,
       ...(params.initializationOptions || {})
     };
+    this.logServer("info", "initialize", `workspaceFolders=${this.workspaceFolders.length} rootPaths=${(this.settings.rootPaths || []).length} preferQueryBackend=${this.settings.preferQueryBackend !== false}`);
     return {
       capabilities: {
         textDocumentSync: 1,
@@ -235,6 +307,7 @@ class LonaLanguageServer {
   }
 
   openDocument(textDocument) {
+    this.logServer("trace", "document", `open uri=${textDocument.uri} version=${textDocument.version}`);
     this.documents.set(textDocument.uri, this.createDocumentState(textDocument));
     this.invalidateModuleForDocument(textDocument.uri);
     this.refreshDiagnosticsSafely(textDocument.uri);
@@ -245,6 +318,7 @@ class LonaLanguageServer {
     if (!existing || !params.contentChanges.length) {
       return;
     }
+    this.logServer("trace", "document", `change uri=${params.textDocument.uri} version=${params.textDocument.version}`);
     const latestChange = params.contentChanges[params.contentChanges.length - 1];
     const previousText = existing.text;
     existing.text = latestChange.text;
@@ -255,6 +329,7 @@ class LonaLanguageServer {
       resolveQueryContext(existing, this.settings) &&
       countLineBreaks(previousText) !== countLineBreaks(existing.text)
     ) {
+      this.logServer("trace", "query", `mark dirty from line-count change uri=${existing.uri}`);
       markQuerySessionDirty(existing, this.settings);
     }
     this.scheduleQueryIdleReload(existing.uri);
@@ -267,14 +342,17 @@ class LonaLanguageServer {
     if (!existing) {
       return;
     }
+    this.logServer("trace", "document", `save uri=${textDocument.uri} version=${existing.version}`);
     this.clearQueryIdleReload(textDocument.uri);
     if (this.settings.preferQueryBackend !== false && resolveQueryContext(existing, this.settings)) {
+      this.logServer("trace", "query", `mark dirty from save uri=${existing.uri}`);
       markQuerySessionDirty(existing, this.settings);
     }
     this.refreshDiagnosticsSafely(textDocument.uri);
   }
 
   closeDocument(textDocument) {
+    this.logServer("trace", "document", `close uri=${textDocument.uri}`);
     this.clearQueryIdleReload(textDocument.uri);
     this.documents.delete(textDocument.uri);
     this.invalidateModuleForDocument(textDocument.uri);
@@ -320,12 +398,14 @@ class LonaLanguageServer {
     if (!document || this.settings.preferQueryBackend === false || !resolveQueryContext(document, this.settings)) {
       return;
     }
+    this.logServer("trace", "query", `schedule idle reload uri=${uri} delay=${QUERY_IDLE_RELOAD_MS}ms`);
     const timer = setTimeout(() => {
       this.queryIdleTimers.delete(uri);
       const latest = this.getDocument(uri);
       if (!latest || this.settings.preferQueryBackend === false || !resolveQueryContext(latest, this.settings)) {
         return;
       }
+      this.logServer("trace", "query", `idle reload fired uri=${uri}`);
       markQuerySessionDirty(latest, this.settings);
       this.refreshDiagnosticsSafely(uri);
     }, QUERY_IDLE_RELOAD_MS);
@@ -340,6 +420,7 @@ class LonaLanguageServer {
     if (timer) {
       clearTimeout(timer);
       this.queryIdleTimers.delete(uri);
+      this.logServer("trace", "query", `clear idle reload uri=${uri}`);
     }
   }
 
@@ -438,9 +519,11 @@ class LonaLanguageServer {
       this.logServerError(`completion:${document.filePath || document.uri}`, error);
     }
     if (queryItems !== null) {
+      this.logServer("trace", "completion", `query result uri=${document.uri} count=${queryItems.length}`);
       return queryItems;
     }
     const offset = positionToOffset(document.text, params.position);
+    this.logServer("trace", "completion", `fallback local index uri=${document.uri}`);
     return buildCompletionItems(documentIndex, offset, (importSymbol) => this.resolveModuleIndex(document, importSymbol));
   }
 
@@ -457,6 +540,7 @@ class LonaLanguageServer {
       this.logServerError(`definition:${document.filePath || document.uri}`, error);
     }
     if (queryLocation && queryLocation.path) {
+      this.logServer("trace", "definition", `query result uri=${document.uri} target=${queryLocation.path}`);
       return {
         uri: pathToUri(queryLocation.path),
         range: queryLocation.range
@@ -471,6 +555,7 @@ class LonaLanguageServer {
     if (!target || !target.path) {
       return null;
     }
+    this.logServer("trace", "definition", `fallback local index uri=${document.uri} target=${target.path}`);
     return {
       uri: pathToUri(target.path),
       range: target.range
@@ -490,9 +575,11 @@ class LonaLanguageServer {
       this.logServerError(`hover:${document.filePath || document.uri}`, error);
     }
     if (queryHover) {
+      this.logServer("trace", "hover", `query result uri=${document.uri}`);
       return queryHover;
     }
     const offset = positionToOffset(document.text, params.position);
+    this.logServer("trace", "hover", `fallback local index uri=${document.uri}`);
     return findHoverInfo(
       documentIndex,
       offset,
@@ -513,9 +600,11 @@ class LonaLanguageServer {
       this.logServerError(`signature-help:${document.filePath || document.uri}`, error);
     }
     if (queryHelp) {
+      this.logServer("trace", "signature-help", `query result uri=${document.uri}`);
       return queryHelp;
     }
     const offset = positionToOffset(document.text, params.position);
+    this.logServer("trace", "signature-help", `fallback local index uri=${document.uri}`);
     return findSignatureHelp(
       documentIndex,
       offset,
@@ -528,16 +617,20 @@ class LonaLanguageServer {
     if (!document) {
       return;
     }
+    this.logServer("trace", "diagnostics", `refresh uri=${uri}`);
     if (!this.settings.enableDiagnostics) {
+      this.logServer("trace", "diagnostics", `disabled uri=${uri}`);
       this.publishDiagnostics(uri, []);
       return;
     }
     if (this.settings.preferQueryBackend === false) {
+      this.logServer("trace", "diagnostics", `query backend disabled uri=${uri}`);
       this.publishDiagnostics(uri, []);
       return;
     }
     const queryContext = resolveQueryContext(document, this.settings);
     if (!queryContext) {
+      this.logServer("trace", "diagnostics", `no query context uri=${uri}`);
       this.publishDiagnostics(uri, []);
       return;
     }
@@ -550,6 +643,7 @@ class LonaLanguageServer {
       return;
     }
     if (queryDiagnostics === null) {
+      this.logServer("trace", "diagnostics", `query returned null uri=${uri}`);
       return;
     }
     const rawDiagnostics = queryDiagnostics || [];
@@ -571,6 +665,7 @@ class LonaLanguageServer {
       source: diagnostic.source,
       message: diagnostic.message
     }));
+    this.logServer("trace", "diagnostics", `publish uri=${uri} count=${relevantDiagnostics.length}`);
     this.publishDiagnostics(uri, relevantDiagnostics);
   }
 

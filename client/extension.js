@@ -4,11 +4,22 @@ const cp = require("child_process");
 const path = require("path");
 const vscode = require("vscode");
 
+const REQUEST_WARNING_MS = 3000;
+
+function logToChannel(channel, level, message) {
+  if (!channel) {
+    return;
+  }
+  const method = typeof channel[level] === "function" ? level : "appendLine";
+  channel[method](message);
+}
+
 class JsonRpcClient {
   constructor(processHandle, outputChannel) {
     this.processHandle = processHandle;
     this.outputChannel = outputChannel;
     this.buffer = Buffer.alloc(0);
+    this.stderrBuffer = "";
     this.pending = new Map();
     this.notificationHandlers = new Map();
     this.nextId = 1;
@@ -18,8 +29,14 @@ class JsonRpcClient {
       this.processBuffer();
     });
     this.processHandle.stderr.on("data", (chunk) => {
-      this.outputChannel.append(chunk.toString("utf8"));
+      this.handleServerStderr(chunk.toString("utf8"));
     });
+    this.processHandle.on("exit", (code, signal) => this.handleProcessExit(code, signal));
+    this.processHandle.on("error", (error) => this.handleProcessError(error));
+  }
+
+  log(level, message) {
+    logToChannel(this.outputChannel, level, message);
   }
 
   onNotification(method, handler) {
@@ -33,6 +50,7 @@ class JsonRpcClient {
   }
 
   sendNotification(method, params) {
+    this.log("info", `<- notify ${method}`);
     this.send({
       jsonrpc: "2.0",
       method,
@@ -43,15 +61,84 @@ class JsonRpcClient {
   sendRequest(method, params) {
     const id = this.nextId;
     this.nextId += 1;
-    this.send({
-      jsonrpc: "2.0",
-      id,
-      method,
-      params
-    });
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const startedAt = Date.now();
+      const warningTimer = setTimeout(() => {
+        this.log("warn", `pending request #${id} ${method} for ${REQUEST_WARNING_MS}ms`);
+      }, REQUEST_WARNING_MS);
+      if (typeof warningTimer.unref === "function") {
+        warningTimer.unref();
+      }
+      this.pending.set(id, {
+        resolve,
+        reject,
+        method,
+        startedAt,
+        warningTimer
+      });
+      this.log("info", `-> request #${id} ${method}`);
+      try {
+        this.send({
+          jsonrpc: "2.0",
+          id,
+          method,
+          params
+        });
+      } catch (error) {
+        clearTimeout(warningTimer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
+  }
+
+  handleServerStderr(chunk) {
+    this.stderrBuffer += chunk;
+    while (true) {
+      const newline = this.stderrBuffer.indexOf("\n");
+      if (newline === -1) {
+        return;
+      }
+      const line = this.stderrBuffer.slice(0, newline).trim();
+      this.stderrBuffer = this.stderrBuffer.slice(newline + 1);
+      if (!line) {
+        continue;
+      }
+      this.logServerLine(line);
+    }
+  }
+
+  logServerLine(line) {
+    const match = line.match(/^\[lona-lsp\]\[(trace|info|warn|error)\]\[([^\]]+)\]\s?(.*)$/);
+    if (match) {
+      const [, level, scope, message] = match;
+      this.log(level, `[${scope}] ${message}`);
+      return;
+    }
+    this.log("error", `[server] ${line}`);
+  }
+
+  rejectPending(error) {
+    for (const [id, pending] of this.pending.entries()) {
+      clearTimeout(pending.warningTimer);
+      pending.reject(error);
+      this.pending.delete(id);
+    }
+  }
+
+  handleProcessExit(code, signal) {
+    const reason = `language server exited (code=${code}, signal=${signal || "none"})`;
+    this.log(code === 0 ? "info" : "warn", reason);
+    if (this.stderrBuffer.trim()) {
+      this.log("error", `[server] ${this.stderrBuffer.trim()}`);
+      this.stderrBuffer = "";
+    }
+    this.rejectPending(new Error(reason));
+  }
+
+  handleProcessError(error) {
+    this.log("error", `language server process error: ${error && error.message ? error.message : String(error)}`);
+    this.rejectPending(error);
   }
 
   processBuffer() {
@@ -85,15 +172,20 @@ class JsonRpcClient {
         return;
       }
       this.pending.delete(message.id);
+      clearTimeout(pending.warningTimer);
+      const duration = Date.now() - pending.startedAt;
       if (message.error) {
+        this.log("error", `<- response #${message.id} ${pending.method} failed in ${duration}ms: ${message.error.message || "Unknown LSP error"}`);
         pending.reject(new Error(message.error.message || "Unknown LSP error"));
         return;
       }
+      this.log("info", `<- response #${message.id} ${pending.method} in ${duration}ms`);
       pending.resolve(message.result);
       return;
     }
 
     const handler = this.notificationHandlers.get(message.method);
+    this.log("info", `-> server notification ${message.method}`);
     if (handler) {
       handler(message.params || {});
     }
@@ -162,7 +254,7 @@ function readSettings() {
 class LonaExtensionClient {
   constructor(context) {
     this.context = context;
-    this.outputChannel = vscode.window.createOutputChannel("Lona Language Tools");
+    this.outputChannel = vscode.window.createOutputChannel("Lona Language Tools", { log: true });
     this.diagnostics = vscode.languages.createDiagnosticCollection("lona");
     this.rpc = null;
     this.processHandle = null;
@@ -171,9 +263,13 @@ class LonaExtensionClient {
 
   async start() {
     const serverPath = this.context.asAbsolutePath(path.join("server", "lsp-server.js"));
+    this.outputChannel.info(`starting language server: ${serverPath}`);
     this.processHandle = cp.spawn(process.execPath, [serverPath], {
       cwd: this.context.extensionPath,
       stdio: ["pipe", "pipe", "pipe"]
+    });
+    this.processHandle.on("spawn", () => {
+      this.outputChannel.info(`language server spawned with pid=${this.processHandle.pid || "unknown"}`);
     });
 
     this.rpc = new JsonRpcClient(this.processHandle, this.outputChannel);
@@ -190,6 +286,7 @@ class LonaExtensionClient {
         item.source = diagnostic.source || "lona-query";
         return item;
       });
+      this.outputChannel.info(`publish diagnostics ${uri.toString()} count=${diagnostics.length}`);
       this.diagnostics.set(uri, diagnostics);
     });
 
@@ -337,12 +434,14 @@ class LonaExtensionClient {
     for (const document of vscode.workspace.textDocuments) {
       this.didOpenDocument(document);
     }
+    this.outputChannel.info("language client initialized");
   }
 
   didOpenDocument(document) {
     if (document.languageId !== "lona") {
       return;
     }
+    this.outputChannel.trace(`didOpen ${document.uri.toString()} version=${document.version}`);
     this.rpc.sendNotification("textDocument/didOpen", {
       textDocument: {
         uri: document.uri.toString(),
@@ -357,6 +456,7 @@ class LonaExtensionClient {
     if (event.document.languageId !== "lona") {
       return;
     }
+    this.outputChannel.trace(`didChange ${event.document.uri.toString()} version=${event.document.version}`);
     this.rpc.sendNotification("textDocument/didChange", {
       textDocument: {
         uri: event.document.uri.toString(),
@@ -374,6 +474,7 @@ class LonaExtensionClient {
     if (document.languageId !== "lona") {
       return;
     }
+    this.outputChannel.trace(`didClose ${document.uri.toString()}`);
     this.diagnostics.delete(document.uri);
     this.rpc.sendNotification("textDocument/didClose", {
       textDocument: {
@@ -386,6 +487,7 @@ class LonaExtensionClient {
     if (document.languageId !== "lona") {
       return;
     }
+    this.outputChannel.trace(`didSave ${document.uri.toString()} version=${document.version}`);
     this.rpc.sendNotification("textDocument/didSave", {
       textDocument: {
         uri: document.uri.toString()
@@ -394,6 +496,7 @@ class LonaExtensionClient {
   }
 
   async stop() {
+    this.outputChannel.info("stopping language client");
     this.diagnostics.clear();
     this.diagnostics.dispose();
     vscode.Disposable.from(...this.subscriptions).dispose();
