@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "tastynoob",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Lona-Lang/vscode-lona-lsp.git"
+  },
   "main": "./client/extension.js",
   "type": "commonjs",
   "engines": {

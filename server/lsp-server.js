@@ -8,6 +8,7 @@ const {
   buildCompletionItems,
   buildDocumentIndex,
   findDefinitionLocation,
+  findHoverInfo,
   positionToOffset,
   resolveImportPath
 } = require("./lona-index");
@@ -15,6 +16,7 @@ const {
   buildQueryCompletionItems,
   closeAllQuerySessions,
   findQueryDefinitionLocation,
+  findQueryHoverInfo,
   markQuerySessionDirty,
   resolveQueryContext,
   runQueryDiagnostics
@@ -157,6 +159,8 @@ class LonaLanguageServer {
         return this.provideCompletion(params);
       case "textDocument/definition":
         return this.provideDefinition(params);
+      case "textDocument/hover":
+        return this.provideHover(params);
       default:
         return null;
     }
@@ -217,7 +221,8 @@ class LonaLanguageServer {
           resolveProvider: false,
           triggerCharacters: ["."]
         },
-        definitionProvider: true
+        definitionProvider: true,
+        hoverProvider: true
       }
     };
   }
@@ -358,6 +363,10 @@ class LonaLanguageServer {
     return findQueryDefinitionLocation(document, documentIndex, position, this.settings);
   }
 
+  async queryHoverInfo(document, documentIndex, position) {
+    return findQueryHoverInfo(document, documentIndex, position, this.settings);
+  }
+
   async queryDiagnostics(document) {
     return runQueryDiagnostics(document, this.settings);
   }
@@ -455,6 +464,29 @@ class LonaLanguageServer {
       uri: pathToUri(target.path),
       range: target.range
     };
+  }
+
+  async provideHover(params) {
+    const document = this.getDocument(params.textDocument.uri);
+    if (!document) {
+      return null;
+    }
+    const documentIndex = this.getOrBuildIndex(document);
+    let queryHover = null;
+    try {
+      queryHover = await this.queryHoverInfo(document, documentIndex, params.position);
+    } catch (error) {
+      this.logServerError(`hover:${document.filePath || document.uri}`, error);
+    }
+    if (queryHover) {
+      return queryHover;
+    }
+    const offset = positionToOffset(document.text, params.position);
+    return findHoverInfo(
+      documentIndex,
+      offset,
+      (importSymbol) => this.resolveModuleIndex(document, importSymbol)
+    );
   }
 
   async refreshDiagnostics(uri) {

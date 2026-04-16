@@ -25,6 +25,7 @@ class CrashTolerantServer extends LonaLanguageServer {
     super(connection);
     this.queryCompletionError = null;
     this.queryDefinitionError = null;
+    this.queryHoverError = null;
     this.queryDiagnosticsImpl = null;
     this.logged = [];
   }
@@ -46,6 +47,13 @@ class CrashTolerantServer extends LonaLanguageServer {
   async queryDefinitionLocation() {
     if (this.queryDefinitionError) {
       throw this.queryDefinitionError;
+    }
+    return null;
+  }
+
+  async queryHoverInfo() {
+    if (this.queryHoverError) {
+      throw this.queryHoverError;
     }
     return null;
   }
@@ -128,6 +136,41 @@ def run() i32 {
   assert.equal(location.range.start.line, 2);
   assert.equal(location.range.start.character, 8);
   assert.ok(server.logged.some((entry) => entry.scope.startsWith("definition:")));
+});
+
+test("hover falls back to the local index when query throws", async () => {
+  const { workspace, filePath } = writeWorkspaceFile("lona-lsp-hover-", "main.lo", `
+struct Point {
+    value i32
+}
+
+def run() i32 {
+    var point Point = Point(value = 1)
+    ret point.value
+}
+`);
+  const connection = new FakeConnection();
+  const server = new CrashTolerantServer(connection);
+  server.settings = {
+    ...server.settings,
+    rootPaths: [workspace]
+  };
+  server.queryHoverError = new Error("query crashed");
+  server.openDocument({
+    uri: fileUri(filePath),
+    text: fs.readFileSync(filePath, "utf8"),
+    version: 1
+  });
+
+  const hover = await server.provideHover({
+    textDocument: { uri: fileUri(filePath) },
+    position: { line: 7, character: 15 }
+  });
+
+  assert.ok(hover);
+  assert.ok(Array.isArray(hover.contents));
+  assert.equal(hover.contents[0].value, "value i32");
+  assert.ok(server.logged.some((entry) => entry.scope.startsWith("hover:")));
 });
 
 test("diagnostics keep the last successful publish when query throws", async () => {

@@ -254,6 +254,43 @@ class LonaExtensionClient {
           }
         }
       ),
+      vscode.languages.registerHoverProvider(
+        [
+          { language: "lona", scheme: "file" },
+          { language: "lona", scheme: "untitled" }
+        ],
+        {
+          provideHover: async (document, position) => {
+            const hover = await this.rpc.sendRequest("textDocument/hover", {
+              textDocument: { uri: document.uri.toString() },
+              position: toLspPosition(position)
+            });
+            if (!hover || !Array.isArray(hover.contents) || hover.contents.length === 0) {
+              return null;
+            }
+            const contents = hover.contents.map((item) => {
+              if (item && item.language && item.value) {
+                const markdown = new vscode.MarkdownString();
+                markdown.appendCodeblock(item.value, item.language);
+                return markdown;
+              }
+              const markdown = new vscode.MarkdownString();
+              markdown.appendText(item && item.value ? item.value : String(item || ""));
+              return markdown;
+            });
+            let range = undefined;
+            if (hover.range) {
+              range = new vscode.Range(
+                hover.range.start.line,
+                hover.range.start.character,
+                hover.range.end.line,
+                hover.range.end.character
+              );
+            }
+            return new vscode.Hover(contents, range);
+          }
+        }
+      ),
       vscode.workspace.onDidOpenTextDocument((document) => this.didOpenDocument(document)),
       vscode.workspace.onDidChangeTextDocument((event) => this.didChangeDocument(event)),
       vscode.workspace.onDidSaveTextDocument((document) => this.didSaveDocument(document)),

@@ -1754,6 +1754,85 @@ function definitionLocationForState(state, currentIndex) {
   return makeDefinitionLocation(state.moduleIndex && state.moduleIndex.filePath, state.symbol);
 }
 
+function hoverRangeForState(state, currentIndex) {
+  if (!state || !state.symbol || !state.symbol.range) {
+    return null;
+  }
+  if (state.kind === "value") {
+    return state.symbol.range;
+  }
+  if (state.kind === "module" || state.kind === "import") {
+    return state.symbol.range;
+  }
+  if (state.moduleIndex && state.moduleIndex.filePath !== currentIndex.filePath) {
+    return null;
+  }
+  return state.symbol.range;
+}
+
+function makeHoverInfo(code, text, range) {
+  const contents = [];
+  if (code) {
+    contents.push({
+      language: "lona",
+      value: code
+    });
+  }
+  if (text) {
+    contents.push({
+      kind: "plaintext",
+      value: text
+    });
+  }
+  if (contents.length === 0) {
+    return null;
+  }
+  return range ? { contents, range } : { contents };
+}
+
+function hoverInfoForState(state, currentIndex) {
+  if (!state) {
+    return null;
+  }
+
+  const range = hoverRangeForState(state, currentIndex);
+
+  if (state.kind === "value") {
+    const prefix = state.symbol.kind === "parameter" ? "param" : "var";
+    const suffix = state.symbol.type ? ` ${state.symbol.type}` : "";
+    return makeHoverInfo(`${prefix} ${state.symbol.name}${suffix}`, null, range);
+  }
+
+  if (state.kind === "module" || state.kind === "import") {
+    return makeHoverInfo(`import ${state.symbol.path}`, null, range);
+  }
+
+  if (state.kind === "struct") {
+    return makeHoverInfo(`struct ${state.symbol.name}`, null, range);
+  }
+
+  if (state.kind === "trait") {
+    return makeHoverInfo(`trait ${state.symbol.name}`, null, range);
+  }
+
+  if (state.kind === "function" || state.kind === "method") {
+    return makeHoverInfo(formatFunctionDetail(state.symbol), null, range);
+  }
+
+  if (state.kind === "global") {
+    const suffix = state.symbol.declaredType ? ` ${state.symbol.declaredType}` : "";
+    return makeHoverInfo(`global ${state.symbol.name}${suffix}`, null, range);
+  }
+
+  if (state.kind === "field") {
+    const prefix = state.symbol.writable ? "set " : "";
+    const suffix = state.symbol.declaredType ? ` ${state.symbol.declaredType}` : "";
+    return makeHoverInfo(`${prefix}${state.symbol.name}${suffix}`, null, range);
+  }
+
+  return null;
+}
+
 function advanceDefinitionState(state, segment, context) {
   let current = state;
 
@@ -1820,6 +1899,18 @@ function advanceDefinitionState(state, segment, context) {
       };
     }
     const method = current.struct ? current.struct.methods.find((candidate) => candidate.name === segment) : current.symbol.methods.find((candidate) => candidate.name === segment);
+    if (method) {
+      return {
+        kind: "method",
+        symbol: method,
+        moduleIndex: current.moduleIndex
+      };
+    }
+    return null;
+  }
+
+  if (current.kind === "trait") {
+    const method = current.trait ? current.trait.methods.find((candidate) => candidate.name === segment) : current.symbol.methods.find((candidate) => candidate.name === segment);
     if (method) {
       return {
         kind: "method",
@@ -1932,6 +2023,34 @@ function findDefinitionLocation(documentIndex, offset, resolveModuleIndex) {
   return null;
 }
 
+function findHoverInfo(documentIndex, offset, resolveModuleIndex) {
+  const reference = getReferenceContext(documentIndex, offset);
+  if (!reference || reference.segments.length === 0) {
+    return null;
+  }
+
+  const context = buildDefinitionContext(documentIndex, offset, resolveModuleIndex);
+  let state = resolveRootState(reference.segments[0], context);
+  if (!state) {
+    return null;
+  }
+  if (reference.targetSegmentIndex === 0) {
+    return hoverInfoForState(state, documentIndex);
+  }
+
+  for (let index = 1; index < reference.segments.length; index += 1) {
+    state = advanceDefinitionState(stateForContinuation(state, context), reference.segments[index], context);
+    if (!state) {
+      return null;
+    }
+    if (index === reference.targetSegmentIndex) {
+      return hoverInfoForState(state, documentIndex);
+    }
+  }
+
+  return null;
+}
+
 function resolveImportPath(currentFilePath, importPath, includeDirectories) {
   if (!currentFilePath) {
     return null;
@@ -1961,6 +2080,7 @@ module.exports = {
   buildCompletionItems,
   buildDocumentIndex,
   findDefinitionLocation,
+  findHoverInfo,
   getReferenceContext,
   getCompletionContext,
   normalizeTypeText,

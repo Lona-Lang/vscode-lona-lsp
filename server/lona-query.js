@@ -917,6 +917,107 @@ function locationFromQueryLocation(location) {
   };
 }
 
+function makeHoverInfo(code, text, range) {
+  const contents = [];
+  if (code) {
+    contents.push({
+      language: "lona",
+      value: code
+    });
+  }
+  if (text) {
+    contents.push({
+      kind: "plaintext",
+      value: text
+    });
+  }
+  if (contents.length === 0) {
+    return null;
+  }
+  return range ? { contents, range } : { contents };
+}
+
+function makeQuerySignatureHover(name, signature, receiverAccess) {
+  const prefix = receiverAccess === "set" ? "set def" : "def";
+  return `${prefix} ${name}${signature || ""}`;
+}
+
+function formatQueryValueHover(item) {
+  if (!item) {
+    return null;
+  }
+  if (item.kind === "func") {
+    return makeHoverInfo(makeQuerySignatureHover(item.name, item.signature, item.receiverAccess), null, locationFromQueryLocation(item.location) && locationFromQueryLocation(item.location).range);
+  }
+  if (item.kind === "member") {
+    const prefix = item.access === "set" ? "set " : "";
+    const suffix = item.type ? ` ${item.type}` : "";
+    return makeHoverInfo(`${prefix}${item.name}${suffix}`, item.ownerType ? `owner: ${item.ownerType}` : null, locationFromQueryLocation(item.location) && locationFromQueryLocation(item.location).range);
+  }
+  if (item.kind === "global") {
+    const suffix = item.type ? ` ${item.type}` : "";
+    return makeHoverInfo(`global ${item.name}${suffix}`, null, locationFromQueryLocation(item.location) && locationFromQueryLocation(item.location).range);
+  }
+  const prefix = item.detail || (item.kind === "self" ? "self" : "var");
+  const suffix = item.type ? ` ${item.type}` : "";
+  return makeHoverInfo(`${prefix} ${item.name}${suffix}`, null, locationFromQueryLocation(item.location) && locationFromQueryLocation(item.location).range);
+}
+
+function formatQueryTypeHover(item) {
+  if (!item) {
+    return null;
+  }
+  if (item.kind === "trait") {
+    return makeHoverInfo(`trait ${item.name}`, null, locationFromQueryLocation(item.location) && locationFromQueryLocation(item.location).range);
+  }
+  const declKind = item.declKind === "native" || !item.declKind ? "struct" : item.declKind;
+  return makeHoverInfo(`${declKind} ${item.name}`, null, locationFromQueryLocation(item.location) && locationFromQueryLocation(item.location).range);
+}
+
+function formatQueryGlobalHover(item) {
+  if (!item) {
+    return null;
+  }
+  const range = locationFromQueryLocation(item.location) && locationFromQueryLocation(item.location).range;
+  switch (item.kind) {
+    case "struct":
+      return makeHoverInfo(`struct ${item.name}`, null, range);
+    case "trait":
+      return makeHoverInfo(`trait ${item.name}`, null, range);
+    case "func":
+    case "method":
+      return makeHoverInfo(makeQuerySignatureHover(item.name, item.detail, item.receiverAccess), null, range);
+    case "global":
+      return makeHoverInfo(`global ${item.name}${item.detail ? ` ${item.detail}` : ""}`, null, range);
+    case "field":
+      return makeHoverInfo(`${item.name}${item.detail ? ` ${item.detail}` : ""}`, null, range);
+    case "import":
+      return makeHoverInfo(`import ${item.name}`, null, range);
+    default:
+      return makeHoverInfo(item.name, item.detail || null, range);
+  }
+}
+
+function formatQueryMemberHover(member, ownerTypeName, kind) {
+  if (!member) {
+    return null;
+  }
+  if (kind === "method") {
+    return makeHoverInfo(
+      makeQuerySignatureHover(member.name, member.signature || member.detail, member.receiverAccess),
+      ownerTypeName ? `owner: ${unwrapTypeForLookup(ownerTypeName)}` : null,
+      locationFromQueryLocation(member.location) && locationFromQueryLocation(member.location).range
+    );
+  }
+  const prefix = member.access === "set" ? "set " : "";
+  const suffix = member.type ? ` ${member.type}` : "";
+  return makeHoverInfo(
+    `${prefix}${member.name}${suffix}`,
+    ownerTypeName ? `owner: ${unwrapTypeForLookup(ownerTypeName)}` : null,
+    locationFromQueryLocation(member.location) && locationFromQueryLocation(member.location).range
+  );
+}
+
 async function resolveScopeContext(queryRunner, moduleName, line) {
   const infoLocal = await queryRunner.infoLocal(line, moduleName);
   let scopeLine = hasLocalScope(infoLocal) ? line : null;
@@ -1071,6 +1172,85 @@ async function advanceDefinitionState(state, segment, queryRunner) {
   return null;
 }
 
+async function advanceHoverState(state, segment, queryRunner) {
+  if (!state) {
+    return null;
+  }
+
+  if (state.kind === "module") {
+    const globalsReply = await queryRunner.infoGlobal(state.moduleName);
+    const globals = resolveRootGlobals(globalsReply);
+    const item = globals.find((candidate) => candidate.name === segment);
+    if (!item) {
+      return null;
+    }
+    const normalizedKind = normalizeQueryGlobalKind(item.kind);
+    if (normalizedKind === "type" || normalizedKind === "trait") {
+      const reply = await queryRunner.pt(segment, state.moduleName);
+      if (!reply || !reply.ok || !reply.result || !reply.result.found || !reply.result.item) {
+        return null;
+      }
+      return {
+        kind: "type",
+        typeName: qualifiedTypeNameFromReplyItem(reply.result.item, segment, state.moduleName),
+        moduleName: state.moduleName,
+        hover: formatQueryTypeHover(reply.result.item)
+      };
+    }
+    if (normalizedKind === "func" || normalizedKind === "global") {
+      const reply = await queryRunner.pv(segment, null, state.moduleName);
+      if (!reply || !reply.ok || !reply.result || !reply.result.found || !reply.result.item) {
+        return null;
+      }
+      return {
+        kind: "value",
+        descriptor: makeDescriptorFromPvItem(reply.result.item),
+        moduleName: state.moduleName,
+        hover: formatQueryValueHover(reply.result.item)
+      };
+    }
+    return {
+      kind: "module-item",
+      moduleName: state.moduleName,
+      hover: formatQueryGlobalHover(item)
+    };
+  }
+
+  const ownerTypeName = state.kind === "type" ? state.typeName : state.descriptor && state.descriptor.type;
+  if (!ownerTypeName) {
+    return null;
+  }
+
+  const descriptor = state.kind === "type"
+    ? await queryTypeDescriptor(queryRunner, ownerTypeName, state.moduleName)
+    : await queryDescriptorForType(ownerTypeName, state.descriptor, queryRunner, state.moduleName);
+  if (!descriptor) {
+    return null;
+  }
+
+  const field = descriptor.members.find((member) => member.name === segment);
+  if (field) {
+    return {
+      kind: "value",
+      descriptor: makeValueDescriptor(field.type, field.typeInfo || null),
+      moduleName: state.moduleName,
+      hover: formatQueryMemberHover(field, ownerTypeName, "field")
+    };
+  }
+
+  const method = descriptor.methods.find((member) => member.name === segment);
+  if (method) {
+    return {
+      kind: "value",
+      descriptor: makeValueDescriptor(parseReturnType(method.signature || method.detail), null),
+      moduleName: state.moduleName,
+      hover: formatQueryMemberHover(method, ownerTypeName, "method")
+    };
+  }
+
+  return null;
+}
+
 async function resolveQueryDefinitionLocation(document, documentIndex, position, settings) {
   if (!canUseQueryBackend(document, settings)) {
     return null;
@@ -1213,6 +1393,109 @@ async function buildQueryCompletionItems(document, documentIndex, position, sett
   return Array.from(items.values()).sort((left, right) => left.label.localeCompare(right.label, "en"));
 }
 
+async function findQueryHoverInfo(document, documentIndex, position, settings) {
+  if (!canUseQueryBackend(document, settings)) {
+    return null;
+  }
+
+  const context = resolveQueryContext(document, settings);
+  if (!context) {
+    return null;
+  }
+
+  const offset = positionToOffset(document.text, position);
+  const reference = getReferenceContext(documentIndex, offset);
+  if (!reference || !reference.segments.length) {
+    return null;
+  }
+
+  const queryRunner = makeQueryRunner(context, settings);
+  const rootGlobalReply = await queryRunner.infoGlobal(context.activeModule);
+  const line = position.line + 1;
+  const scopeContext = await resolveScopeContext(queryRunner, context.activeModule, line);
+  const rootGlobals = resolveRootGlobals(rootGlobalReply);
+  const locals = resolveLocals(scopeContext.scopeLocalReply);
+  const scopeMaps = buildScopeMaps(rootGlobals, locals);
+
+  let state = null;
+  const rootName = reference.segments[0];
+  if (scopeMaps.localsByName.has(rootName)) {
+    const reply = await queryRunner.pv(rootName, scopeContext.scopeLine, context.activeModule);
+    if (reply && reply.ok && reply.result && reply.result.found && reply.result.item) {
+      state = {
+        kind: "value",
+        descriptor: makeDescriptorFromPvItem(reply.result.item),
+        moduleName: context.activeModule,
+        hover: formatQueryValueHover(reply.result.item)
+      };
+    } else {
+      const local = scopeMaps.localsByName.get(rootName);
+      state = {
+        kind: "value",
+        descriptor: makeValueDescriptor(local.type, null),
+        moduleName: context.activeModule,
+        hover: makeHoverInfo(`${local.detail || "var"} ${local.name}${local.type ? ` ${local.type}` : ""}`, null, locationFromQueryLocation(local.location) && locationFromQueryLocation(local.location).range)
+      };
+    }
+  } else if (documentIndex.importMap && documentIndex.importMap.has(rootName)) {
+    const importSymbol = documentIndex.importMap.get(rootName);
+    state = {
+      kind: "module",
+      moduleName: resolveImportedModuleCanonical(document, documentIndex, rootName, context),
+      hover: makeHoverInfo(`import ${importSymbol.path}`, null, importSymbol.range || null)
+    };
+  } else if (scopeMaps.globalsByName.has(rootName)) {
+    const item = scopeMaps.globalsByName.get(rootName);
+    const normalizedKind = normalizeQueryGlobalKind(item.kind);
+    if (normalizedKind === "type" || normalizedKind === "trait") {
+      const reply = await queryRunner.pt(rootName, context.activeModule);
+      if (reply && reply.ok && reply.result && reply.result.found && reply.result.item) {
+        state = {
+          kind: "type",
+          typeName: qualifiedTypeNameFromReplyItem(reply.result.item, rootName, context.activeModule),
+          moduleName: context.activeModule,
+          hover: formatQueryTypeHover(reply.result.item)
+        };
+      }
+    } else if (normalizedKind === "func" || normalizedKind === "global") {
+      const reply = await queryRunner.pv(rootName, scopeContext.scopeLine, context.activeModule);
+      if (reply && reply.ok && reply.result && reply.result.found && reply.result.item) {
+        state = {
+          kind: "value",
+          descriptor: makeDescriptorFromPvItem(reply.result.item),
+          moduleName: context.activeModule,
+          hover: formatQueryValueHover(reply.result.item)
+        };
+      }
+    } else {
+      state = {
+        kind: "module-item",
+        moduleName: context.activeModule,
+        hover: formatQueryGlobalHover(item)
+      };
+    }
+  }
+
+  if (!state || !state.hover) {
+    return null;
+  }
+  if (reference.targetSegmentIndex === 0) {
+    return state.hover;
+  }
+
+  for (let index = 1; index < reference.segments.length; index += 1) {
+    state = await advanceHoverState(state, reference.segments[index], queryRunner);
+    if (!state || !state.hover) {
+      return null;
+    }
+    if (index === reference.targetSegmentIndex) {
+      return state.hover;
+    }
+  }
+
+  return null;
+}
+
 async function runQueryDiagnostics(document, settings) {
   if (!canUseQueryBackend(document, settings)) {
     return null;
@@ -1233,6 +1516,7 @@ module.exports = {
   canonicalModuleName,
   closeAllQuerySessions,
   findQueryDefinitionLocation: resolveQueryDefinitionLocation,
+  findQueryHoverInfo,
   markQuerySessionDirty,
   resolveQueryContext,
   runQueryCommands,
