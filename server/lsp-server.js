@@ -541,16 +541,22 @@ class LonaLanguageServer {
   }
 
   resolveModuleIndex(currentDocument, importSymbol) {
-    const currentIndex = this.getOrBuildIndex(currentDocument);
-    const resolvedPath = resolveImportPath(
-      currentDocument.filePath,
-      importSymbol.path,
-      buildModuleRoots(currentDocument, this.settings)
-    );
+    const resolvedPath = this.resolveModulePath(currentDocument.filePath, importSymbol);
     if (!resolvedPath) {
       return null;
     }
     return this.loadModuleIndex(resolvedPath);
+  }
+
+  resolveModulePath(currentFilePath, importSymbol) {
+    if (!currentFilePath || !importSymbol) {
+      return null;
+    }
+    return resolveImportPath(
+      currentFilePath,
+      importSymbol.path,
+      buildModuleRoots({ filePath: currentFilePath }, this.settings)
+    );
   }
 
   resolveModuleDefinitionLocation(currentDocument, documentIndex, position) {
@@ -565,6 +571,32 @@ class LonaLanguageServer {
     }
     const moduleIndex = this.resolveModuleIndex(currentDocument, importSymbol);
     return moduleIndex && moduleIndex.filePath ? makeFileEntryLocation(moduleIndex.filePath) : null;
+  }
+
+  collectDiagnosticScopePaths(document, documentIndex) {
+    const reachablePaths = new Set();
+
+    const visit = (filePath, index) => {
+      const normalizedPath = filePath ? path.normalize(filePath) : null;
+      if (!normalizedPath || reachablePaths.has(normalizedPath)) {
+        return;
+      }
+      reachablePaths.add(normalizedPath);
+      const moduleIndex = index || this.loadModuleIndex(normalizedPath);
+      if (!moduleIndex || !Array.isArray(moduleIndex.imports)) {
+        return;
+      }
+      for (const importSymbol of moduleIndex.imports) {
+        const importedPath = this.resolveModulePath(moduleIndex.filePath, importSymbol);
+        if (!importedPath) {
+          continue;
+        }
+        visit(importedPath, this.loadModuleIndex(importedPath));
+      }
+    };
+
+    visit(document.filePath, documentIndex);
+    return reachablePaths;
   }
 
   loadModuleIndex(filePath) {
@@ -750,6 +782,7 @@ class LonaLanguageServer {
     if (!latestDocument || latestDocument.version !== version) {
       return;
     }
+    const scopePaths = this.collectDiagnosticScopePaths(latestDocument, this.getOrBuildIndex(latestDocument));
     const diagnosticsByUri = new Map();
     const skippedUris = new Set();
     const ensureBucket = (targetUri) => {
@@ -762,7 +795,12 @@ class LonaLanguageServer {
     ensureBucket(uri);
 
     for (const diagnostic of rawDiagnostics) {
-      const targetUri = diagnostic.path ? pathToUri(path.normalize(diagnostic.path)) : uri;
+      const targetPath = diagnostic.path ? path.normalize(diagnostic.path) : latestDocument.filePath;
+      if (targetPath && scopePaths.size > 0 && !scopePaths.has(targetPath)) {
+        this.logServer("trace", "diagnostics", `ignore unrelated query diagnostic uri=${uri} path=${targetPath}`);
+        continue;
+      }
+      const targetUri = targetPath ? pathToUri(targetPath) : uri;
       if (!this.shouldPublishQueryDiagnosticsToUri(targetUri)) {
         skippedUris.add(targetUri);
         this.logServer("trace", "diagnostics", `skip stale query diagnostics for dirty document uri=${targetUri}`);

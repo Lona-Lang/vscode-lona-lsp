@@ -11,8 +11,10 @@ const {
   buildQueryCompletionItems,
   canUseQueryBackend,
   closeAllQuerySessions,
+  diagnosticsFromQueryReply,
   findQueryDefinitionLocation,
   getActiveQuerySessionCount,
+  normalizeQueryModuleName,
   resolveQueryContext,
   runQueryDiagnostics
 } = require("../server/lona-query");
@@ -100,6 +102,42 @@ test("query backend uses automatic root paths when provided by the wrapper", () 
     entryFilePath: filePath,
     entryModule: "main"
   });
+});
+
+test("normalizeQueryModuleName strips file suffixes for reload commands", () => {
+  assert.equal(normalizeQueryModuleName("math/ops.lo"), "math/ops");
+  assert.equal(normalizeQueryModuleName("math\\ops.lo"), "math/ops");
+  assert.equal(normalizeQueryModuleName("math/ops"), "math/ops");
+});
+
+test("diagnosticsFromQueryReply ignores driver command errors without locations", () => {
+  const diagnostics = diagnosticsFromQueryReply({
+    ok: true,
+    command: "diagnostics",
+    result: {
+      items: [
+        {
+          category: "driver",
+          message: "reload paths should omit the file suffix",
+          hint: "Write reload paths like `reload math/ops`, not `reload math/ops.lo`.",
+          location: null
+        },
+        {
+          category: "resolve",
+          message: "undefined identifier `missing`",
+          location: {
+            path: "/tmp/main.lo",
+            line: 2,
+            column: 9
+          }
+        }
+      ]
+    }
+  });
+
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].path, "/tmp/main.lo");
+  assert.match(diagnostics[0].message, /undefined identifier/);
 });
 
 test("query-backed definition resolves imported field definitions", async () => {

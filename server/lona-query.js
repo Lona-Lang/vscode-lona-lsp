@@ -93,6 +93,17 @@ function canonicalModuleName(filePath, rootPaths) {
   return canonicalMatches.length === 1 ? canonicalMatches[0] : null;
 }
 
+function normalizeQueryModuleName(moduleName) {
+  if (typeof moduleName !== "string") {
+    return null;
+  }
+  const trimmed = moduleName.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.replace(/\\/g, "/").replace(/\.lo$/, "") || null;
+}
+
 function resolveQueryContext(document, settings) {
   if (!document || !document.filePath) {
     return null;
@@ -182,8 +193,9 @@ class QuerySession {
   }
 
   markDirty(moduleName) {
-    if (moduleName) {
-      this.dirtyModules.add(moduleName);
+    const normalizedModuleName = normalizeQueryModuleName(moduleName);
+    if (normalizedModuleName) {
+      this.dirtyModules.add(normalizedModuleName);
     }
   }
 
@@ -247,7 +259,7 @@ class QuerySession {
     };
 
     if (nextState.dirtyModules.size > 0) {
-      for (const moduleName of Array.from(nextState.dirtyModules).sort()) {
+      for (const moduleName of Array.from(nextState.dirtyModules).map(normalizeQueryModuleName).filter(Boolean).sort()) {
         commands.push(`reload ${moduleName}`);
       }
       nextState.dirtyModules.clear();
@@ -255,7 +267,7 @@ class QuerySession {
       nextState.currentLine = null;
     }
 
-    const moduleToOpen = targetModule || nextState.currentModule;
+    const moduleToOpen = normalizeQueryModuleName(targetModule || nextState.currentModule);
     if (moduleToOpen && nextState.currentModule !== moduleToOpen) {
       commands.push(`open ${moduleToOpen}`);
       nextState.currentModule = moduleToOpen;
@@ -272,7 +284,16 @@ class QuerySession {
     }
 
     writeQueryLog("trace", this.scope, `prepare ${commands.join(" | ")}`);
-    await this.sendCommandsRaw(commands);
+    const replies = await this.sendCommandsRaw(commands);
+    const failedReply = replies.find((reply) => reply && reply.ok === false);
+    if (failedReply) {
+      const reason = failedReply.result && failedReply.result.error
+        ? failedReply.result.error
+        : `lona-query command failed: ${failedReply.command || "unknown"}`;
+      writeQueryLog("warn", this.scope, `prepare failed ${failedReply.command || "unknown"}: ${reason}`);
+      this.close();
+      throw new Error(reason);
+    }
     this.currentModule = nextState.currentModule;
     this.currentLine = nextState.currentLine;
     this.dirtyModules = nextState.dirtyModules;
@@ -428,11 +449,15 @@ function diagnosticsFromQueryReply(reply) {
     return [];
   }
   const items = reply.result && Array.isArray(reply.result.items) ? reply.result.items : [];
-  return items.map((item) => {
+  return items.flatMap((item) => {
+    if (item && item.category === "driver" && !item.location) {
+      writeQueryLog("warn", "query-diagnostics", `${item.message}${item.hint ? ` | ${item.hint}` : ""}`);
+      return [];
+    }
     const line = item.location ? Math.max(0, item.location.line - 1) : 0;
     const character = item.location ? Math.max(0, item.location.column - 1) : 0;
     const hint = item.hint ? `\n${item.hint}` : "";
-    return {
+    return [{
       path: item.location && item.location.path ? normalizePath(item.location.path) : null,
       range: {
         start: { line, character },
@@ -441,7 +466,7 @@ function diagnosticsFromQueryReply(reply) {
       severity: 1,
       source: "lona-query",
       message: `${item.message}${hint}`
-    };
+    }];
   });
 }
 
@@ -1933,11 +1958,13 @@ module.exports = {
   canUseQueryBackend,
   canonicalModuleName,
   closeAllQuerySessions,
+  diagnosticsFromQueryReply,
   getActiveQuerySessionCount,
   findQueryDefinitionLocation: resolveQueryDefinitionLocation,
   findQueryHoverInfo,
   findQuerySignatureHelp,
   markQuerySessionDirty,
+  normalizeQueryModuleName,
   resolveQueryContext,
   runQueryCommands,
   runQueryDiagnostics

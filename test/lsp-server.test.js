@@ -346,6 +346,70 @@ test("diagnostics publish imported module errors to their target uri and clear s
   assert.equal(helperClear.params.diagnostics.length, 0);
 });
 
+test("diagnostics ignore unrelated query diagnostics from previously loaded modules", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-lsp-unrelated-diagnostics-"));
+  const badPath = path.join(workspace, "bad.lo");
+  const okPath = path.join(workspace, "ok.lo");
+  fs.writeFileSync(badPath, "def bad() i32 {\n    ret missing\n}\n", "utf8");
+  fs.writeFileSync(okPath, "def ok() i32 {\n    ret 1\n}\n", "utf8");
+
+  const connection = new FakeConnection();
+  const server = new CrashTolerantServer(connection);
+  const badUri = fileUri(badPath);
+  const okUri = fileUri(okPath);
+  server.settings = {
+    ...server.settings,
+    rootPaths: [workspace]
+  };
+  server.queryDiagnosticsImpl = async (document) => {
+    if (document.filePath === badPath) {
+      return [{
+        path: badPath,
+        range: {
+          start: { line: 1, character: 8 },
+          end: { line: 1, character: 15 }
+        },
+        severity: 1,
+        source: "lona-query",
+        message: "undefined identifier `missing`"
+      }];
+    }
+    return [{
+      path: badPath,
+      range: {
+        start: { line: 1, character: 8 },
+        end: { line: 1, character: 15 }
+      },
+      severity: 1,
+      source: "lona-query",
+      message: "stale diagnostic"
+    }];
+  };
+
+  server.openDocument({
+    uri: badUri,
+    text: fs.readFileSync(badPath, "utf8"),
+    version: 1
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  connection.messages.length = 0;
+
+  server.openDocument({
+    uri: okUri,
+    text: fs.readFileSync(okPath, "utf8"),
+    version: 1
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(connection.messages.length, 2);
+  const okPublish = connection.messages.find((message) => message.params.uri === okUri);
+  const badClear = connection.messages.find((message) => message.params.uri === badUri);
+  assert.ok(okPublish);
+  assert.ok(badClear);
+  assert.equal(okPublish.params.diagnostics.length, 0);
+  assert.equal(badClear.params.diagnostics.length, 0);
+});
+
 test("notification-side diagnostics failures are swallowed", async () => {
   const { workspace, filePath } = writeWorkspaceFile("lona-lsp-notify-", "main.lo", "def run() i32 {\n    ret 0\n}\n");
   const connection = new FakeConnection();
