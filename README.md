@@ -1,6 +1,6 @@
-# Lona Query Tools
+# Lona Query Suite
 
-`Lona Query Tools` 是 Lona 语言的 VS Code 扩展仓库。
+`Lona Query Suite` 是 Lona 语言的 VS Code 扩展仓库。
 
 主要能力如下：
 
@@ -79,7 +79,7 @@
 ### 安装 VSIX
 
 ```bash
-code --install-extension /path/to/lona-query-tools-<version>.vsix --force
+code --install-extension /path/to/lona-query-suite-<version>.vsix --force
 ```
 
 ### 调试扩展
