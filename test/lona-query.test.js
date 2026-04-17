@@ -149,6 +149,37 @@ def run() i32 {
   closeAllQuerySessions();
 });
 
+test("query-backed definition ignores imported module alias roots without throwing", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-query-module-root-"));
+  const mainPath = path.join(workspace, "main.lo");
+  const helperPath = path.join(workspace, "helper.lo");
+  fs.writeFileSync(helperPath, "def id(v i32) i32 {\n    ret v\n}\n", "utf8");
+  const mainText = `
+import helper
+
+def run() i32 {
+    ret helper.id(1)
+}
+`;
+  fs.writeFileSync(mainPath, mainText, "utf8");
+
+  const document = {
+    uri: `file://${mainPath}`,
+    filePath: mainPath,
+    text: mainText
+  };
+  const index = buildDocumentIndex(document);
+  const location = await findQueryDefinitionLocation(document, index, { line: 1, character: 8 }, {
+    queryPath: "lona-query",
+    rootPaths: [workspace],
+    preferQueryBackend: true
+  });
+
+  assert.equal(location, null);
+
+  closeAllQuerySessions();
+});
+
 test("query diagnostics follow the active document within configured root paths", async () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-query-diagnostics-"));
   const mainPath = path.join(workspace, "main.lo");

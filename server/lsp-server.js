@@ -10,6 +10,7 @@ const {
   findDefinitionLocation,
   findHoverInfo,
   findSignatureHelp,
+  getReferenceContext,
   positionToOffset,
   resolveImportPath
 } = require("./lona-index");
@@ -79,6 +80,19 @@ function uriToPath(uri) {
 
 function pathToUri(filePath) {
   return pathToFileURL(filePath).toString();
+}
+
+function makeFileEntryLocation(filePath) {
+  if (!filePath) {
+    return null;
+  }
+  return {
+    path: path.normalize(filePath),
+    range: {
+      start: { line: 0, character: 0 },
+      end: { line: 0, character: 0 }
+    }
+  };
 }
 
 class JsonRpcConnection {
@@ -539,6 +553,20 @@ class LonaLanguageServer {
     return this.loadModuleIndex(resolvedPath);
   }
 
+  resolveModuleDefinitionLocation(currentDocument, documentIndex, position) {
+    const offset = positionToOffset(currentDocument.text, position);
+    const reference = getReferenceContext(documentIndex, offset);
+    if (!reference || reference.targetSegmentIndex !== 0 || !reference.segments.length) {
+      return null;
+    }
+    const importSymbol = documentIndex.importMap.get(reference.segments[0]);
+    if (!importSymbol) {
+      return null;
+    }
+    const moduleIndex = this.resolveModuleIndex(currentDocument, importSymbol);
+    return moduleIndex && moduleIndex.filePath ? makeFileEntryLocation(moduleIndex.filePath) : null;
+  }
+
   loadModuleIndex(filePath) {
     const normalizedPath = path.normalize(filePath);
     const openDocument = Array.from(this.documents.values()).find((candidate) => candidate.filePath === normalizedPath);
@@ -596,6 +624,14 @@ class LonaLanguageServer {
       return null;
     }
     const documentIndex = this.getOrBuildIndex(document);
+    const moduleLocation = this.resolveModuleDefinitionLocation(document, documentIndex, params.position);
+    if (moduleLocation && moduleLocation.path) {
+      this.logServer("trace", "definition", `module target uri=${document.uri} target=${moduleLocation.path}`);
+      return {
+        uri: pathToUri(moduleLocation.path),
+        range: moduleLocation.range
+      };
+    }
     let queryLocation = null;
     try {
       queryLocation = await this.queryDefinitionLocation(document, documentIndex, params.position);

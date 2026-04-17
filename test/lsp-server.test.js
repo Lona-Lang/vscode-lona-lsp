@@ -146,6 +146,44 @@ def run() i32 {
   assert.ok(server.logged.some((entry) => entry.scope.startsWith("definition:")));
 });
 
+test("definition resolves imported modules in the wrapper before query lookup", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-lsp-module-definition-"));
+  const mainPath = path.join(workspace, "main.lo");
+  const helperPath = path.join(workspace, "helper.lo");
+  fs.writeFileSync(helperPath, "def id(v i32) i32 {\n    ret v\n}\n", "utf8");
+  fs.writeFileSync(mainPath, "import helper\n\ndef run() i32 {\n    ret helper.id(1)\n}\n", "utf8");
+
+  const connection = new FakeConnection();
+  const server = new CrashTolerantServer(connection);
+  server.settings = {
+    ...server.settings,
+    rootPaths: [workspace]
+  };
+  server.queryDefinitionError = new Error("query should not run for module lookup");
+  server.openDocument({
+    uri: fileUri(mainPath),
+    text: fs.readFileSync(mainPath, "utf8"),
+    version: 1
+  });
+
+  const importLocation = await server.provideDefinition({
+    textDocument: { uri: fileUri(mainPath) },
+    position: { line: 0, character: 8 }
+  });
+  assert.equal(importLocation.uri, fileUri(helperPath));
+  assert.equal(importLocation.range.start.line, 0);
+  assert.equal(importLocation.range.start.character, 0);
+
+  const aliasLocation = await server.provideDefinition({
+    textDocument: { uri: fileUri(mainPath) },
+    position: { line: 3, character: 8 }
+  });
+  assert.equal(aliasLocation.uri, fileUri(helperPath));
+  assert.equal(aliasLocation.range.start.line, 0);
+  assert.equal(aliasLocation.range.start.character, 0);
+  assert.ok(!server.logged.some((entry) => entry.scope.startsWith("definition:")));
+});
+
 test("hover falls back to the local index when query throws", async () => {
   const { workspace, filePath } = writeWorkspaceFile("lona-lsp-hover-", "main.lo", `
 struct Point {

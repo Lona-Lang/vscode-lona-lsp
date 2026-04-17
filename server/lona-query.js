@@ -1491,10 +1491,14 @@ async function resolveQueryDefinitionLocation(document, documentIndex, position,
       location: locationFromQueryLocation(local.location)
     };
   } else if (documentIndex.importMap && documentIndex.importMap.has(rootName)) {
+    const importedModule = resolveImportedModuleCanonical(document, documentIndex, rootName, context);
+    if (!importedModule) {
+      return null;
+    }
     state = {
       kind: "module",
-      moduleName: resolveImportedModuleCanonical(document, documentIndex, rootName, context),
-      location: locationFromQueryLocation(scopeMaps.globalsByName.get(rootName).location)
+      moduleName: importedModule,
+      location: null
     };
   } else if (scopeMaps.globalsByName.has(rootName)) {
     const item = scopeMaps.globalsByName.get(rootName);
