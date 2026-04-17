@@ -902,6 +902,69 @@ function qualifyImportedType(typeText, moduleAlias, moduleIndex) {
   return normalized.replace(root, `${moduleAlias}.${root}`);
 }
 
+function inferCallLikeInitializerType(tokens, startIndex, endIndex, context) {
+  if (startIndex >= endIndex || !tokens[startIndex] || tokens[startIndex].type !== "identifier") {
+    return null;
+  }
+
+  let moduleAlias = null;
+  let moduleIndex = context.currentIndex;
+  let symbolName = tokens[startIndex].value;
+  let index = startIndex + 1;
+
+  if (
+    tokens[index] &&
+    tokens[index].value === "." &&
+    tokens[index + 1] &&
+    tokens[index + 1].type === "identifier"
+  ) {
+    moduleAlias = symbolName;
+    symbolName = tokens[index + 1].value;
+    const importSymbol = context.currentIndex.importMap.get(moduleAlias);
+    if (!importSymbol) {
+      return null;
+    }
+    moduleIndex = context.resolveModuleIndex(importSymbol);
+    if (!moduleIndex) {
+      return null;
+    }
+    index += 2;
+  }
+
+  let appliedSuffix = "";
+  if (tokens[index] && tokens[index].value === "[") {
+    const closeTypeArgs = findMatching(tokens, index, "[", "]", endIndex);
+    if (closeTypeArgs === -1) {
+      return null;
+    }
+    appliedSuffix = tokenText(context.currentIndex.text, tokens, index, closeTypeArgs + 1);
+    index = closeTypeArgs + 1;
+  }
+
+  if (!tokens[index] || tokens[index].value !== "(") {
+    return null;
+  }
+
+  if (moduleIndex.structs.has(symbolName)) {
+    const baseName = moduleAlias ? `${moduleAlias}.${symbolName}` : symbolName;
+    return normalizeTypeText(`${baseName}${appliedSuffix}`);
+  }
+
+  if (moduleIndex.functions.has(symbolName)) {
+    const returnType = moduleIndex.functions.get(symbolName).returnType || null;
+    if (!returnType) {
+      return null;
+    }
+    return moduleAlias ? qualifyImportedType(returnType, moduleAlias, moduleIndex) : returnType;
+  }
+
+  if (!moduleAlias && context.visibleSymbols.has(symbolName)) {
+    return context.visibleSymbols.get(symbolName).type || null;
+  }
+
+  return null;
+}
+
 function inferTypeFromInitializer(tokens, startIndex, endIndex, context) {
   if (startIndex >= endIndex) {
     return null;
@@ -938,43 +1001,9 @@ function inferTypeFromInitializer(tokens, startIndex, endIndex, context) {
     return "bool";
   }
 
-  if (first.type === "identifier" && tokens[startIndex + 1] && tokens[startIndex + 1].value === "(") {
-    const symbolName = first.value;
-    if (context.currentIndex.structs.has(symbolName)) {
-      return symbolName;
-    }
-    if (context.currentIndex.functions.has(symbolName)) {
-      return context.currentIndex.functions.get(symbolName).returnType || null;
-    }
-    if (context.visibleSymbols.has(symbolName)) {
-      return context.visibleSymbols.get(symbolName).type || null;
-    }
-  }
-
-  if (
-    first.type === "identifier" &&
-    tokens[startIndex + 1] &&
-    tokens[startIndex + 1].value === "." &&
-    tokens[startIndex + 2] &&
-    tokens[startIndex + 2].type === "identifier" &&
-    tokens[startIndex + 3] &&
-    tokens[startIndex + 3].value === "("
-  ) {
-    const alias = first.value;
-    const member = tokens[startIndex + 2].value;
-    const importSymbol = context.currentIndex.importMap.get(alias);
-    if (importSymbol) {
-      const moduleIndex = context.resolveModuleIndex(importSymbol);
-      if (moduleIndex) {
-        if (moduleIndex.structs.has(member)) {
-          return `${alias}.${member}`;
-        }
-        const functionSymbol = moduleIndex.functions.get(member);
-        if (functionSymbol && functionSymbol.returnType) {
-          return qualifyImportedType(functionSymbol.returnType, alias, moduleIndex);
-        }
-      }
-    }
+  const inferredCallType = inferCallLikeInitializerType(tokens, startIndex, endIndex, context);
+  if (inferredCallType) {
+    return inferredCallType;
   }
 
   if (first.type === "identifier" && endIndex === startIndex + 1 && context.visibleSymbols.has(first.value)) {

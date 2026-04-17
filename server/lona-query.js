@@ -572,6 +572,53 @@ function splitTupleTypes(typeText) {
   return items.filter(Boolean);
 }
 
+function extractLeadingTypeName(typeText) {
+  const trimmed = normalizeTypeText(typeText);
+  if (!trimmed || trimmed.startsWith("<") || trimmed.startsWith("(")) {
+    return null;
+  }
+  const match = trimmed.match(/^[A-Za-z_][A-Za-z0-9_.]*/);
+  return match ? match[0] : null;
+}
+
+function extractAppliedGenericBaseType(typeText) {
+  const normalized = normalizeTypeText(typeText);
+  if (!normalized) {
+    return null;
+  }
+  const leading = extractLeadingTypeName(normalized);
+  if (!leading) {
+    return null;
+  }
+
+  const suffix = normalized.slice(leading.length).trim();
+  if (!suffix.startsWith("[") || !suffix.endsWith("]")) {
+    return null;
+  }
+
+  let squareDepth = 0;
+  for (let index = 0; index < suffix.length; index += 1) {
+    const ch = suffix[index];
+    if (ch === "[") {
+      squareDepth += 1;
+    } else if (ch === "]") {
+      squareDepth = Math.max(0, squareDepth - 1);
+      if (squareDepth === 0 && index !== suffix.length - 1) {
+        return null;
+      }
+    }
+  }
+  if (squareDepth !== 0) {
+    return null;
+  }
+
+  const body = suffix.slice(1, -1).trim();
+  if (!body || /^\d+(?:\s*,\s*\d+)*$/.test(body)) {
+    return null;
+  }
+  return leading;
+}
+
 function unwrapTypeForLookup(typeText) {
   let current = normalizeTypeText(typeText);
   if (!current) {
@@ -605,13 +652,21 @@ function buildTypeLookupCandidates(typeText, moduleName) {
     return [];
   }
   const candidates = [normalized];
-  if (moduleName) {
-    const localPrefix = `${moduleName}.`;
-    if (normalized.startsWith(localPrefix)) {
-      candidates.push(normalized.slice(localPrefix.length));
+  const appliedGenericBase = extractAppliedGenericBaseType(normalized);
+  if (appliedGenericBase && appliedGenericBase !== normalized) {
+    candidates.push(appliedGenericBase);
+  }
+  const qualifiedCandidates = [];
+  for (const candidate of candidates) {
+    qualifiedCandidates.push(candidate);
+    if (moduleName) {
+      const localPrefix = `${moduleName}.`;
+      if (candidate.startsWith(localPrefix)) {
+        qualifiedCandidates.push(candidate.slice(localPrefix.length));
+      }
     }
   }
-  return Array.from(new Set(candidates.filter(Boolean)));
+  return Array.from(new Set(qualifiedCandidates.filter(Boolean)));
 }
 
 function makeTypeDescriptorFromTypeInfo(typeInfo) {
@@ -676,6 +731,21 @@ function makeDescriptorFromPvItem(item) {
     return makeValueDescriptor(parseReturnType(item.signature), null);
   }
   return makeValueDescriptor(item.type, item.typeInfo || null);
+}
+
+async function queryTypeReply(queryRunner, typeName, moduleName) {
+  const candidates = buildTypeLookupCandidates(typeName, moduleName);
+  for (const candidate of candidates) {
+    const reply = await queryRunner.pt(candidate, moduleName);
+    if (!reply || !reply.ok || !reply.result || !reply.result.found || !reply.result.item) {
+      continue;
+    }
+    if (reply.result.item.kind !== "type" && reply.result.item.kind !== "trait") {
+      continue;
+    }
+    return reply;
+  }
+  return null;
 }
 
 function resolveImportedModuleCanonical(document, documentIndex, alias, context) {
@@ -770,14 +840,8 @@ async function queryTypeDescriptor(queryRunner, typeName, moduleName) {
     return builtin;
   }
 
-  for (const candidate of candidates) {
-    const reply = await queryRunner.pt(candidate, moduleName);
-    if (!reply || !reply.ok || !reply.result || !reply.result.found || !reply.result.item) {
-      continue;
-    }
-    if (reply.result.item.kind !== "type" && reply.result.item.kind !== "trait") {
-      continue;
-    }
+  const reply = await queryTypeReply(queryRunner, typeName, moduleName);
+  if (reply && reply.result && reply.result.item) {
     return makeTypeDescriptorFromPtItem(reply.result.item);
   }
   return null;
@@ -1184,7 +1248,8 @@ function qualifiedTypeNameFromReplyItem(item, fallbackTypeName, fallbackModuleNa
   if (item && item.type) {
     return item.type;
   }
-  const fallback = unwrapTypeForLookup(fallbackTypeName);
+  const fallback = extractAppliedGenericBaseType(unwrapTypeForLookup(fallbackTypeName))
+    || unwrapTypeForLookup(fallbackTypeName);
   if (!fallback) {
     return null;
   }
@@ -1195,7 +1260,8 @@ function qualifiedTypeNameFromReplyItem(item, fallbackTypeName, fallbackModuleNa
 }
 
 function splitQualifiedTypeName(typeName, fallbackModuleName) {
-  const normalized = unwrapTypeForLookup(typeName);
+  const normalized = extractAppliedGenericBaseType(unwrapTypeForLookup(typeName))
+    || unwrapTypeForLookup(typeName);
   if (!normalized) {
     return null;
   }
@@ -1213,7 +1279,7 @@ function splitQualifiedTypeName(typeName, fallbackModuleName) {
 }
 
 async function resolveFieldDefinitionLocation(typeName, fieldName, queryRunner, moduleName) {
-  const typeReply = await queryRunner.pt(unwrapTypeForLookup(typeName), moduleName);
+  const typeReply = await queryTypeReply(queryRunner, typeName, moduleName);
   if (!typeReply || !typeReply.ok || !typeReply.result || !typeReply.result.found || !typeReply.result.item) {
     return null;
   }

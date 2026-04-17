@@ -269,6 +269,42 @@ def run() i32 {
   closeAllQuerySessions();
 });
 
+test("query-backed completion resolves applied generic struct receiver members", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-query-generic-receiver-"));
+  const mainPath = path.join(workspace, "main.lo");
+  const mainText = `
+struct Vec[T] {
+    len i32
+    ptr T*
+}
+
+def run[T](value T) i32 {
+    var tmp Vec[T] = Vec[T](len = 1, ptr = &value)
+    ret tmp.len
+}
+`;
+  fs.writeFileSync(mainPath, mainText, "utf8");
+
+  const document = {
+    uri: `file://${mainPath}`,
+    filePath: mainPath,
+    text: mainText
+  };
+  const index = buildDocumentIndex(document);
+  const settings = {
+    queryPath: "lona-query",
+    rootPaths: [workspace],
+    preferQueryBackend: true
+  };
+
+  const structItems = await buildQueryCompletionItems(document, index, { line: 8, character: 12 }, settings, []);
+
+  assert.ok(structItems.some((item) => item.label === "len"));
+  assert.ok(structItems.some((item) => item.label === "ptr"));
+
+  closeAllQuerySessions();
+});
+
 test("query backend reuses a single session across files in the same root paths", async () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "lona-query-session-"));
   const mainPath = path.join(workspace, "main.lo");

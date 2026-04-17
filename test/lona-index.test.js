@@ -139,6 +139,54 @@ def run() i32 {
   assert.ok(dynItems.some((item) => item.label === "hash"));
 });
 
+test("completes applied generic struct receivers", () => {
+  const source = `
+struct Vec[T] {
+    len i32
+    ptr T*
+}
+
+def run[T](value T) i32 {
+    var tmp Vec[T] = Vec[T](len = 1, ptr = &value)
+    ret tmp.len
+}
+`;
+  const index = buildDocumentIndex({
+    uri: "file:///tmp/main.lo",
+    filePath: "/tmp/main.lo",
+    text: source
+  });
+
+  const offset = positionToOffset(source, { line: 8, character: 12 });
+  const items = buildCompletionItems(index, offset, () => null);
+  assert.ok(items.some((item) => item.label === "len"));
+  assert.ok(items.some((item) => item.label === "ptr"));
+});
+
+test("completes inferred applied generic struct receivers", () => {
+  const source = `
+struct Vec[T] {
+    len i32
+    ptr T*
+}
+
+def run[T](value T) i32 {
+    var tmp = Vec[T](len = 1, ptr = &value)
+    ret tmp.len
+}
+`;
+  const index = buildDocumentIndex({
+    uri: "file:///tmp/main.lo",
+    filePath: "/tmp/main.lo",
+    text: source
+  });
+
+  const offset = positionToOffset(source, { line: 8, character: 12 });
+  const items = buildCompletionItems(index, offset, () => null);
+  assert.ok(items.some((item) => item.label === "len"));
+  assert.ok(items.some((item) => item.label === "ptr"));
+});
+
 test("completes locals visible before the cursor", () => {
   const source = `
 def run() i32 {
